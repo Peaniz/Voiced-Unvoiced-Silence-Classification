@@ -352,10 +352,10 @@ if __name__=="__main__":
         ("TinHieuHuanLuyen/studio_M1.wav", "TinHieuHuanLuyen/studio_M1.lab"),
     ]
     testfiles = [
-        ("TinHieuHuanLuyen/phone_F1.wav", "TinHieuHuanLuyen/phone_F1.lab"),
-        ("TinHieuHuanLuyen/phone_M1.wav", "TinHieuHuanLuyen/phone_M1.lab"),
-        ("TinHieuHuanLuyen/studio_F1.wav", "TinHieuHuanLuyen/studio_F1.lab"),
-        ("TinHieuHuanLuyen/studio_M1.wav", "TinHieuHuanLuyen/studio_M1.lab"),
+        ("TinHieuHuanLuyen/phone_F2.wav", "TinHieuHuanLuyen/phone_F2.lab"),
+        ("TinHieuHuanLuyen/phone_F2.wav", "TinHieuHuanLuyen/phone_F2.lab"),
+        ("TinHieuHuanLuyen/studio_F2.wav", "TinHieuHuanLuyen/studio_F2.lab"),
+        ("TinHieuHuanLuyen/studio_F2.wav", "TinHieuHuanLuyen/studio_F2.lab"),
     ]
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
