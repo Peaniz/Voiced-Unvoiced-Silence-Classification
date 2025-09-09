@@ -7,21 +7,30 @@ import warnings
 import os
 from datetime import datetime
 import json
+import argparse
 
 warnings.filterwarnings('ignore')
 plt.rcParams['font.size'] = 10
 plt.rcParams['figure.dpi'] = 100
 
 class SymbolicDynamicsAnalyzer:
-    def __init__(self, window_size=5, frame_size=80):
+    def __init__(self, window_size=5, frame_size=80, trained_thresholds_file="trained_thresholds.json"):
         """
         Symbolic Dynamics Analyzer theo phương pháp trong paper
         """
         self.window_size = window_size
         self.frame_size = frame_size
         
-        # Các ngưỡng mặc định. Những ngưỡng này sẽ được cập nhật động
-        # dựa trên dữ liệu đầu vào.
+        # Load trained thresholds if available
+        self.trained_thresholds = None
+        if trained_thresholds_file and os.path.exists(trained_thresholds_file):
+            self.load_trained_thresholds(trained_thresholds_file)
+            print(f"✓ Loaded trained thresholds from {trained_thresholds_file}")
+        else:
+            print(f"! Trained thresholds file '{trained_thresholds_file}' not found")
+            print("  Will use auto-calculated thresholds")
+        
+        # Các ngưỡng mặc định - sẽ được override bởi trained thresholds hoặc auto-calculated
         self.thresholds = {
             'silence_energy_threshold': None,    
             'unvoiced_zcr_threshold': None,      
@@ -36,8 +45,32 @@ class SymbolicDynamicsAnalyzer:
         self.sample_rate = None
         self.analysis_results = None
     
+    def load_trained_thresholds(self, threshold_file):
+        """Load ngưỡng đã train từ file JSON"""
+        try:
+            with open(threshold_file, 'r') as f:
+                self.trained_thresholds = json.load(f)
+            
+            # Map trained thresholds to our threshold format
+            self.thresholds.update({
+                'silence_energy_threshold': self.trained_thresholds.get('silence_energy'),
+                'silence_symbol0_threshold': self.trained_thresholds.get('silence_prop0', 0.85),
+                'unvoiced_zcr_threshold': self.trained_thresholds.get('unvoiced_zcr'),
+                'voiced_entropy_max': self.trained_thresholds.get('entropy_mid', 0.73),
+            })
+            
+            print("✓ Trained thresholds loaded:")
+            print(f"  Silence Energy: {self.thresholds['silence_energy_threshold']:.6f}")
+            print(f"  Silence Prop0: {self.thresholds['silence_symbol0_threshold']:.3f}")
+            print(f"  Unvoiced ZCR: {self.thresholds['unvoiced_zcr_threshold']:.4f}")
+            print(f"  Entropy Mid: {self.thresholds['voiced_entropy_max']:.3f}")
+            
+        except Exception as e:
+            print(f"✗ Error loading trained thresholds: {e}")
+            self.trained_thresholds = None
+    
     def convert_numpy_types(self, obj):
-        """Đệ quy chuyển đổi các kiểu dữ liệu NumPy thành kiểu Python gốc."""
+        """Để quy chuyển đổi các kiểu dữ liệu NumPy thành kiểu Python gốc."""
         if isinstance(obj, np.generic):
             return obj.item()
         if isinstance(obj, dict):
@@ -158,9 +191,32 @@ class SymbolicDynamicsAnalyzer:
         
         return forbidden_count
     
-    def classify_segment(self, frame_features):
-        """Phân loại segment sử dụng các ngưỡng đã được tính toán"""
+    def calculate_zcr(self, frame):
+        """Tính Zero-Crossing Rate"""
+        return np.sum(np.abs(np.diff(np.sign(frame)))) / (2 * len(frame))
+    
+    def classify_segment_trained(self, frame_features):
+        """Phân loại segment sử dụng trained thresholds"""
+        rms_energy = frame_features['rms_energy']
+        zcr = frame_features['zcr']
+        entropy = frame_features['entropy']
+        prop0 = frame_features.get('prop0', 0)  # Tỷ lệ symbol 0
         
+        # 1. Silence detection - ưu tiên cao nhất
+        if rms_energy < self.thresholds['silence_energy_threshold']:
+            if prop0 > self.thresholds['silence_symbol0_threshold']:
+                return "sil", 0.95
+        
+        # 2. Unvoiced detection  
+        if zcr > self.thresholds['unvoiced_zcr_threshold']:
+            if entropy > self.thresholds['voiced_entropy_max']:
+                return "uv", 0.9
+        
+        # 3. Default to Voiced
+        return "v", 0.85
+    
+    def classify_segment_auto(self, frame_features):
+        """Phân loại segment sử dụng các ngưỡng tự động tính toán (method cũ)"""
         rms_energy = frame_features['rms_energy']
         zcr = frame_features['zcr']
         entropy = frame_features['entropy']
@@ -177,24 +233,28 @@ class SymbolicDynamicsAnalyzer:
         # 3. Mặc định là Voiced
         return "v", 0.85
     
-    def calculate_energy(self, frames):
-        """Tính toán năng lượng của từng khung"""
-        return np.sum(frames ** 2, axis=1)
-
-    def calculate_zcr(self, frames):
-        """Tính toán Zero-Crossing Rate của từng khung"""
-        zcr = np.sum(np.abs(np.diff(np.sign(frames), axis=1)), axis=1) / (2 * self.frame_size)
-        return zcr
+    def classify_segment(self, frame_features):
+        """Phân loại segment - sử dụng trained hoặc auto thresholds"""
+        if self.trained_thresholds:
+            return self.classify_segment_trained(frame_features)
+        else:
+            # Fall back to original auto method
+            return self.classify_segment_auto(frame_features)
 
     def auto_set_all_thresholds(self, all_features):
-        """Tự động xác định tất cả các ngưỡng cần thiết từ dữ liệu thực tế"""
+        """Tự động xác định tất cả các ngưỡng cần thiết từ dữ liệu thực tế (chỉ khi không có trained thresholds)"""
+        if self.trained_thresholds:
+            print("✓ Using trained thresholds, skipping auto-calculation")
+            return
+            
         energy = np.array([f['rms_energy'] for f in all_features])
         zcr = np.array([f['zcr'] for f in all_features])
         
         # 1. Ngưỡng năng lượng cho Silence
         sorted_energy = np.sort(energy)
         num_frames_for_baseline = int(0.1 * len(sorted_energy))
-        if num_frames_for_baseline == 0: num_frames_for_baseline = 1
+        if num_frames_for_baseline == 0: 
+            num_frames_for_baseline = 1
         baseline_energy = np.mean(sorted_energy[:num_frames_for_baseline])
         self.thresholds['silence_energy_threshold'] = baseline_energy * 3.0
         
@@ -230,22 +290,27 @@ class SymbolicDynamicsAnalyzer:
             frame_data = frames[i]
             symbol_string = self.symbolic_dynamics_transform(frame_data)
             
+            # Tính thêm prop0 (tỷ lệ symbol 0) cho trained classification
+            prop0 = np.mean(np.array(symbol_string) == 0) if len(symbol_string) else 0
+            
             features = {
                 'frame_idx': i,
                 'start_time': i * self.frame_size / self.sample_rate,
                 'end_time': (i + 1) * self.frame_size / self.sample_rate,
                 'rms_energy': self.calculate_rms_energy(frame_data),
-                'zcr': self.calculate_zcr(frame_data.reshape(1, -1))[0],
+                'zcr': self.calculate_zcr(frame_data),
                 'symbol_string': symbol_string,
                 'entropy': self.calculate_shannon_entropy(symbol_string),
                 'forbidden_words': self.count_forbidden_words(symbol_string),
+                'prop0': prop0  # Thêm prop0 cho trained method
             }
             all_features.append(features)
         
-        # Bước 2: Dùng các đặc trưng đã trích xuất để tính toán ngưỡng tự động
-        self.auto_set_all_thresholds(all_features)
+        # Bước 2: Setup thresholds (trained hoặc auto)
+        if not self.trained_thresholds:
+            self.auto_set_all_thresholds(all_features)
         
-        # Bước 3: Dùng các ngưỡng tự động để phân loại
+        # Bước 3: Phân loại sử dụng thresholds đã có
         for features in all_features:
             classification, confidence = self.classify_segment(features)
             features['classification'] = classification
@@ -261,6 +326,9 @@ class SymbolicDynamicsAnalyzer:
         print("="*50)
         print(f"Total frames: {num_frames}")
         print(f"Duration: {len(self.audio_data)/self.sample_rate:.2f} seconds")
+        
+        threshold_source = "TRAINED" if self.trained_thresholds else "AUTO-CALCULATED"
+        print(f"Thresholds used: {threshold_source}")
         
         print("\nClassification Distribution:")
         for cls, count in zip(unique, counts):
@@ -278,11 +346,14 @@ class SymbolicDynamicsAnalyzer:
         fig = plt.figure(figsize=(16, 12))
         gs = GridSpec(3, 1, figure=fig, hspace=0.4)
         
+        # Add threshold info to title
+        threshold_info = "TRAINED THRESHOLDS" if self.trained_thresholds else "AUTO-CALCULATED THRESHOLDS"
+        
         # 1. Biểu đồ tổng quát âm thanh
         ax1 = fig.add_subplot(gs[0])
         time_axis = np.arange(len(self.audio_data)) / self.sample_rate
         ax1.plot(time_axis, self.audio_data, color='blue', linewidth=0.8, alpha=0.7)
-        ax1.set_title('A. Original Audio Signal', fontsize=14, fontweight='bold')
+        ax1.set_title(f'A. Original Audio Signal ({threshold_info})', fontsize=14, fontweight='bold')
         ax1.set_xlabel('Time (seconds)')
         ax1.set_ylabel('Amplitude')
         ax1.grid(True, alpha=0.3)
@@ -314,7 +385,8 @@ class SymbolicDynamicsAnalyzer:
                 full_symbol_seq.extend(symbols)
                 full_time_seq.extend(np.linspace(start_time, end_time, len(symbols)))
         
-        ax2.scatter(full_time_seq[::10], full_symbol_seq[::10], color='black', s=10, alpha=0.6)
+        if full_symbol_seq and full_time_seq:
+            ax2.scatter(full_time_seq[::10], full_symbol_seq[::10], color='black', s=10, alpha=0.6)
         
         ax2.set_title('B. Symbolic Dynamics Transformation (Color-Coded by Classification)', fontsize=14, fontweight='bold')
         ax2.set_xlabel('Time (seconds)')
@@ -390,7 +462,7 @@ class SymbolicDynamicsAnalyzer:
         classifications = [r['classification'] for r in self.analysis_results]
         entropies = [r['entropy'] for r in self.analysis_results]
         forbidden_words = [r['forbidden_words'] for r in self.analysis_results]
-        energies = [r['rms_energy'] for r in self.analysis_results]
+        energies = [r['zcr'] for r in self.analysis_results]
         
         colors_map = {'sil': 'lightblue', 'v': 'red', 'uv': 'orange'}
         colors = [colors_map[c] for c in classifications]
@@ -411,12 +483,12 @@ class SymbolicDynamicsAnalyzer:
         ax2.set_ylabel('Forbidden Words Count')
         ax2.grid(True, alpha=0.3)
         
-        # RMS Energy distribution
+        # ZCR distribution
         ax3 = fig1.add_subplot(gs1[1, 0])
         ax3.scatter(range(len(energies)), energies, c=colors, alpha=0.6, s=20)
-        ax3.set_title('RMS Energy Distribution')
+        ax3.set_title('ZCR Distribution')
         ax3.set_xlabel('Frame Index')
-        ax3.set_ylabel('RMS Energy')
+        ax3.set_ylabel('ZCR')
         ax3.grid(True, alpha=0.3)
         
         # Feature space (2D)
@@ -434,6 +506,8 @@ class SymbolicDynamicsAnalyzer:
         
         plt.tight_layout()
         if save_folder:
+            if not os.path.exists(save_folder):
+                os.makedirs(save_folder)
             plt.savefig(os.path.join(save_folder, 'detailed_analysis.png'), 
                         dpi=300, bbox_inches='tight')
         plt.show()
@@ -485,19 +559,25 @@ class SymbolicDynamicsAnalyzer:
         ax_stats.axis('off')
         
         # Calculate statistics for each class
-        stats_text = "CLASSIFICATION STATISTICS:\n\n"
+        threshold_source = "TRAINED" if self.trained_thresholds else "AUTO-CALCULATED"
+        stats_text = f"CLASSIFICATION STATISTICS ({threshold_source} THRESHOLDS):\n\n"
+        
         for cls in ['sil', 'v', 'uv']:
             cls_results = [r for r in self.analysis_results if r['classification'] == cls]
             if cls_results:
                 avg_entropy = np.mean([r['entropy'] for r in cls_results])
                 avg_forbidden = np.mean([r['forbidden_words'] for r in cls_results])
                 avg_energy = np.mean([r['rms_energy'] for r in cls_results])
+                avg_zcr = np.mean([r['zcr'] for r in cls_results])
+                avg_prop0 = np.mean([r.get('prop0', 0) for r in cls_results])
                 count = len(cls_results)
                 
                 stats_text += f"{self.labels_map.get(cls, cls)} ({count} frames):\n"
                 stats_text += f"  Avg Entropy: {avg_entropy:.3f}\n"
                 stats_text += f"  Avg Forbidden Words: {avg_forbidden:.1f}\n"
-                stats_text += f"  Avg RMS Energy: {avg_energy:.4f}\n\n"
+                stats_text += f"  Avg RMS Energy: {avg_energy:.4f}\n"
+                stats_text += f"  Avg ZCR: {avg_zcr:.4f}\n"
+                stats_text += f"  Avg Prop0: {avg_prop0:.3f}\n\n"
         
         ax_stats.text(0.1, 0.9, stats_text, transform=ax_stats.transAxes,
                       fontsize=12, verticalalignment='top', fontfamily='monospace',
@@ -541,12 +621,14 @@ class SymbolicDynamicsAnalyzer:
         
         with open(lab_filename, 'w') as f:
             for start, end, cls in segments:
-                f.write(f"{start:.2f}\t{end:.2f}\t{self.labels_map.get(cls, cls)}\n")
+                f.write(f"{start:.2f}\t{end:.2f}\t{cls}\n")
             
+            # Calculate F0 statistics (simple estimation for voiced segments)
             voiced_segments = [s for s in self.analysis_results if s['classification'] == 'v']
             if voiced_segments:
-                f0_mean = 150
-                f0_std = 25
+                # Simple F0 estimation based on frame energy and other features
+                f0_mean = 150  # Default estimation
+                f0_std = 25    # Default estimation
             else:
                 f0_mean = 0
                 f0_std = 0
@@ -556,6 +638,7 @@ class SymbolicDynamicsAnalyzer:
         
         print(f"✓ Lab file exported: {lab_filename}")
         
+        # Export detailed JSON results
         json_filename = os.path.join(save_folder, f"{filename_prefix}_detailed.json")
         with open(json_filename, 'w') as f:
             serializable_results = self.convert_numpy_types(self.analysis_results)
@@ -565,29 +648,63 @@ class SymbolicDynamicsAnalyzer:
         
         return lab_filename
 
-def run_analysis(wav_file_path):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_folder = f"analysis_output_{timestamp}"
+def run_analysis(wav_file_path, trained_thresholds_file="trained_thresholds.json", show_plots=True, save_results=True):
+    """
+    Chạy phân tích với tùy chọn sử dụng trained thresholds
     
-    analyzer = SymbolicDynamicsAnalyzer()
+    Args:
+        wav_file_path: Đường dẫn tới file âm thanh
+        trained_thresholds_file: Đường dẫn tới file JSON chứa trained thresholds (tùy chọn)
+        show_plots: Hiển thị biểu đồ hay không
+        save_results: Lưu kết quả hay không
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_folder = f"analysis_output_{timestamp}" if save_results else None
+    
+    analyzer = SymbolicDynamicsAnalyzer(trained_thresholds_file=trained_thresholds_file)
     
     if analyzer.load_audio(wav_file_path):
         print("\n1. Running symbolic dynamics analysis...")
         analyzer.analyze_audio()
         
-        print("\n2. Showing main visualization...")
-        analyzer.visualize_main_analysis(save_folder)
+        if show_plots:
+            print("\n2. Showing main visualization...")
+            analyzer.visualize_main_analysis(save_folder)
+            
+            print("\n3. Showing detailed analysis...")
+            analyzer.show_detailed_analysis(save_folder)
         
-        print("\n3. Showing detailed analysis...")
-        analyzer.show_detailed_analysis(save_folder)
+        if save_results:
+            print("\n4. Exporting results...")
+            filename_prefix = os.path.splitext(os.path.basename(wav_file_path))[0]
+            analyzer.export_lab_file(save_folder, filename_prefix)
+            print(f"\nAnalysis complete! All results saved to: {save_folder}")
+        else:
+            print("\nAnalysis complete!")
         
-        print("\n4. Exporting results...")
-        filename_prefix = os.path.splitext(os.path.basename(wav_file_path))[0]
-        analyzer.export_lab_file(save_folder, filename_prefix)
-        
-        print(f"\nAnalysis complete! All results saved to: {save_folder}")
         return analyzer
+    else:
+        return None
 
 # Example usage
 if __name__ == "__main__":
-    analyzer = run_analysis('file/studio_F1.wav')
+    parser = argparse.ArgumentParser(description='Symbolic Dynamics Speech Analysis')
+    parser.add_argument('wav_file', help='Path to WAV file')
+    parser.add_argument('--thresholds', '-t', default='trained_thresholds.json',
+                       help='Path to trained thresholds JSON file (default: trained_thresholds.json)')
+    parser.add_argument('--no-plots', action='store_true', help='Skip displaying plots')
+    parser.add_argument('--no-save', action='store_true', help='Skip saving results')
+    
+    args = parser.parse_args()
+    
+    print("="*60)
+    print("SYMBOLIC DYNAMICS SPEECH ANALYSIS")
+    print("="*60)
+    
+    # Run analysis
+    analyzer = run_analysis(
+        args.wav_file, 
+        args.thresholds, 
+        show_plots=not args.no_plots,
+        save_results=not args.no_save
+    )

@@ -1,0 +1,26 @@
+{
+  "silence_energy": 0.010209210776006358,
+  "silence_prop0": 0.0,
+  "unvoiced_zcr": 0.0625,
+  "entropy_mid": 1.56375841265119,
+  "feature_stats": {
+    "silence": {
+      "energy_mean": 0.002985790184780788,
+      "energy_std": 0.00359965371141758,
+      "prop0_mean": 0.003297250217742939,
+      "prop0_std": 0.013692989494063737
+    },
+    "voiced": {
+      "zcr_mean": 0.0486957349581112,
+      "zcr_std": 0.04045495455622279,
+      "entropy_mean": 1.5040199169643855,
+      "entropy_std": 0.3028435031643877
+    },
+    "unvoiced": {
+      "zcr_mean": 0.1068295739348371,
+      "zcr_std": 0.09157596667111023,
+      "entropy_mean": 1.6234969083379946,
+      "entropy_std": 0.2687213598685892
+    }
+  }
+}
