@@ -1,15 +1,11 @@
 import numpy as np
-from scipy import stats
-from scipy.signal import find_peaks
-from typing import Dict, List, Tuple, Union
-import matplotlib.pyplot as plt
+from typing import Dict, List, Tuple
 from audio_analyzer import AudioAnalyzer
 
 class SUVClassifier:
     """
     Lớp phân loại Speech/Unvoiced/Voiced (SUV) sử dụng STE, ZCR và ST với ground truth
     """
-    
     def __init__(self, frame_length=0.025, frame_shift=0.01, sr=16000):
         """
         Khởi tạo SUV Classifier
@@ -25,7 +21,76 @@ class SUVClassifier:
         self.st_thresholds = {'speech_silence': 0, 'voiced_unvoiced': 0.7}  # Default SUVDA
         self.trained = False
         
-    def train(self, training_files: List[Tuple[str, str]]) -> Dict:
+    def set_thresholds(self, ste_threshold: float, zcr_threshold: float, st_threshold: float):
+        """
+        Đặt ngưỡng từ bên ngoài (sau khi tối ưu với ground truth)
+        
+        Args:
+            ste_threshold: Ngưỡng STE để phân biệt speech/silence
+            zcr_threshold: Ngưỡng ZCR để phân biệt voiced/unvoiced
+            st_threshold: Ngưỡng ST để phân biệt voiced/unvoiced
+        """
+        self.ste_thresholds['speech_silence'] = ste_threshold
+        self.zcr_thresholds['voiced_unvoiced'] = zcr_threshold
+        self.st_thresholds['voiced_unvoiced'] = st_threshold
+        self.trained = True
+        
+    def classify(self, wav_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Phân loại SUV cho một file audio sử dụng STE + ZCR + ST (SUVDA)
+        
+        Args:
+            wav_path (str): Đường dẫn file audio
+            
+        Returns:
+            Tuple: (audio, ste, zcr, st, predictions)
+        """
+        if not self.trained:
+            # Không cần huấn luyện, chỉ cần set ngưỡng từ bên ngoài
+            pass
+        
+        # Load audio
+        audio, _ = self.analyzer.load_audio(wav_path)
+        
+        # Tính STE, ZCR và ST
+        ste = self.analyzer.compute_ste(audio)
+        zcr = self.analyzer.compute_zcr(audio)
+        st = self.analyzer.compute_spectrum_tilt(audio)
+        
+        # Đảm bảo chiều dài khớp nhau
+        min_length = min(len(ste), len(zcr), len(st))
+        ste = ste[:min_length]
+        zcr = zcr[:min_length]
+        st = st[:min_length]
+        
+        # Logic phân loại SUVDA với STE + ZCR + ST
+        predictions = np.zeros(min_length, dtype=int)
+        
+        # Lấy 3 ngưỡng chính
+        energy_threshold = self.ste_thresholds.get('speech_silence', 0)
+        zcr_threshold = self.zcr_thresholds.get('voiced_unvoiced', 0.5)  
+        st_threshold = self.st_thresholds.get('voiced_unvoiced', 0.7)
+        
+        for i in range(min_length):
+            # Logic theo bài báo SUVDA:
+            # - Silence: STE < T_STE 
+            # - Voiced: STE >= T_STE AND ST > T_ST AND ZCR < T_ZCR
+            # - Unvoiced: STE >= T_STE AND (ST < T_ST OR ZCR > T_ZCR)
+            
+            if ste[i] < energy_threshold:
+                # Energy thấp → SILENCE
+                predictions[i] = 0
+            else:
+                # Energy cao → SPEECH
+                # Phân biệt voiced vs unvoiced bằng ST và ZCR
+                if st[i] > st_threshold and zcr[i] < zcr_threshold:
+                    # ST cao (tần số thấp) + ZCR thấp → VOICED
+                    predictions[i] = 1
+                else:
+                    # ST thấp hoặc ZCR cao → UNVOICED
+                    predictions[i] = 2
+        
+        return audio, ste, zcr, st, predictions
         """
         Huấn luyện classifier với ground truth từ file lab
         
@@ -104,7 +169,6 @@ class SUVClassifier:
                                      st_values: np.ndarray, labels: np.ndarray) -> Dict:
         """
         Tính ngưỡng dựa trên ground truth labels
-        
         Args:
             ste_values: STE features
             zcr_values: ZCR features  
@@ -210,7 +274,6 @@ class SUVClassifier:
     def classify(self, wav_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Phân loại SUV cho một file audio sử dụng STE + ZCR + ST (SUVDA)
-        
         Args:
             wav_path (str): Đường dẫn file audio
             
@@ -220,45 +283,48 @@ class SUVClassifier:
         if not self.trained:
             raise ValueError("Classifier chưa được huấn luyện!")
         
-        # Load audio
+        # Bước 1: Load audio từ file WAV
         audio, _ = self.analyzer.load_audio(wav_path)
         
-        # Tính STE, ZCR và ST
-        ste = self.analyzer.compute_ste(audio)
-        zcr = self.analyzer.compute_zcr(audio)
-        st = self.analyzer.compute_spectrum_tilt(audio)
+        # Bước 2: Tính các đặc trưng STE, ZCR và ST
+        ste = self.analyzer.compute_ste(audio)      # Short-time Energy
+        zcr = self.analyzer.compute_zcr(audio)      # Zero Crossing Rate  
+        st = self.analyzer.compute_spectrum_tilt(audio)  # Spectrum Tilt
         
-        # Đảm bảo chiều dài khớp nhau
+        # Bước 3: Đảm bảo chiều dài khớp nhau giữa các đặc trưng
         min_length = min(len(ste), len(zcr), len(st))
         ste = ste[:min_length]
         zcr = zcr[:min_length]
         st = st[:min_length]
         
-        # Logic phân loại SUVDA với STE + ZCR + ST
+        # Bước 4: Khởi tạo mảng predictions (0: silence, 1: voiced, 2: unvoiced)
         predictions = np.zeros(min_length, dtype=int)
         
-        # Lấy 3 ngưỡng chính
-        energy_threshold = self.ste_thresholds.get('speech_silence', 0)
-        zcr_threshold = self.zcr_thresholds.get('voiced_unvoiced', 0.5)  
-        st_threshold = self.st_thresholds.get('voiced_unvoiced', 0.7)
+        # Bước 5: Lấy 3 ngưỡng chính từ thuật toán SUVDA
+        energy_threshold = self.ste_thresholds.get('speech_silence', 0)    # Ngưỡng STE
+        zcr_threshold = self.zcr_thresholds.get('voiced_unvoiced', 0.5)    # Ngưỡng ZCR
+        st_threshold = self.st_thresholds.get('voiced_unvoiced', 0.7)      # Ngưỡng ST
         
+        # Bước 6: Áp dụng logic phân loại SUVDA cho từng frame
         for i in range(min_length):
             # Logic theo bài báo SUVDA:
-            # - Silence: STE < T_STE 
-            # - Voiced: STE >= T_STE AND ST > T_ST AND ZCR < T_ZCR
+            # - Silence: STE < T_STE (năng lượng thấp)
+            # - Voiced: STE >= T_STE AND ST > T_ST AND ZCR < T_ZCR 
+            #   (năng lượng cao + nhiều low freq + ít zero crossing)
             # - Unvoiced: STE >= T_STE AND (ST < T_ST OR ZCR > T_ZCR)
+            #   (năng lượng cao + nhiều high freq hoặc nhiều zero crossing)
             
             if ste[i] < energy_threshold:
-                # Energy thấp → SILENCE
+                # Điều kiện 1: Energy thấp → SILENCE
                 predictions[i] = 0
             else:
-                # Energy cao → SPEECH
+                # Điều kiện 2: Energy cao → SPEECH
                 # Phân biệt voiced vs unvoiced bằng ST và ZCR
                 if st[i] > st_threshold and zcr[i] < zcr_threshold:
-                    # ST cao (tần số thấp) + ZCR thấp → VOICED
+                    # ST cao (tần số thấp dominant) + ZCR thấp (ít thay đổi dấu) → VOICED
                     predictions[i] = 1
                 else:
-                    # ST thấp hoặc ZCR cao → UNVOICED
+                    # ST thấp (tần số cao) hoặc ZCR cao (nhiều thay đổi dấu) → UNVOICED
                     predictions[i] = 2
         
         return audio, ste, zcr, st, predictions
@@ -266,20 +332,17 @@ class SUVClassifier:
     def smooth_predictions(self, predictions: np.ndarray, min_segment_length: int = 30) -> np.ndarray:
         """
         Làm mịn dự đoán với nhiều bước xử lý
-        
         Args:
             predictions (np.ndarray): Dự đoán gốc
             min_segment_length (int): Độ dài tối thiểu của segment (số frame)
-            
         Returns:
             np.ndarray: Dự đoán đã được làm mịn
         """
         smoothed = predictions.copy()
         
-        # Bước 1: Median filter để loại bỏ noise
-        from scipy import signal
+        # Bước 1: Median filter tự viết để loại bỏ noise
         if len(smoothed) > 5:
-            smoothed = signal.medfilt(smoothed, kernel_size=5)
+            smoothed = self._median_filter(smoothed, kernel_size=5)
             smoothed = smoothed.astype(int)
         
         # Bước 2: Loại bỏ các đoạn quá ngắn cho tất cả các class
@@ -344,3 +407,35 @@ class SUVClassifier:
             smoothed = final_smoothed
         
         return smoothed
+    
+    def _median_filter(self, data: np.ndarray, kernel_size: int = 5) -> np.ndarray:
+        """
+        Args:
+            data: Dữ liệu đầu vào
+            kernel_size: Kích thước kernel (phải là số lẻ)
+            
+        Returns:
+            np.ndarray: Dữ liệu đã được lọc
+        """
+        # Bước 1: Đảm bảo kernel_size là số lẻ
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        
+        # Bước 2: Tính half_size để xác định vùng kernel
+        half_size = kernel_size // 2
+        filtered_data = np.zeros_like(data)
+        
+        # Bước 3: Áp dụng median filter cho từng điểm
+        for i in range(len(data)):
+            # Xác định vùng kernel xung quanh điểm i
+            start = max(0, i - half_size)
+            end = min(len(data), i + half_size + 1)
+            
+            # Lấy các giá trị trong kernel
+            kernel_values = data[start:end]
+            
+            # Tính median bằng built-in function của numpy
+            # Median: giá trị ở giữa khi sắp xếp tăng dần
+            filtered_data[i] = np.median(kernel_values)
+        
+        return filtered_data

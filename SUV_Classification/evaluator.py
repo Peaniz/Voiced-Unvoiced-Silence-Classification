@@ -1,276 +1,334 @@
+#!/usr/bin/env python3
+"""
+MODULE ĐÁNH GIÁ SUV CLASSIFICATION
+Xử lý demo phân loại, tính accuracy và so sánh với ground truth
+Chỉ sử dụng các hàm tự viết và built-in functions của Python/Numpy
+"""
+
+import os
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Dict, Tuple
-import os
+from audio_analyzer import AudioAnalyzer
+from suv_classifier import SUVClassifier
+from plotter import plot_comparison_with_ground_truth
 
-class SUVEvaluator:
+def find_test_files_with_labels(test_dir):
     """
-    Lớp đánh giá hiệu suất phân loại SUV
+    Tìm các file test có cả .wav và .lab để demo với ground truth
+    
+    Args:
+        test_dir: Thư mục chứa file test
+        
+    Returns:
+        List[Tuple]: Danh sách (wav_path, lab_path)
     """
+    test_files = []
     
-    def __init__(self, sr=16000, hop_size=0.01):
-        """
-        Khởi tạo evaluator
-        
-        Args:
-            sr (int): Tần số lấy mẫu
-            hop_size (float): Bước nhảy khung (giây)
-        """
-        self.sr = sr
-        self.hop_size = hop_size
-        
-    def segments_to_boundaries(self, segments: List[Dict]) -> List[float]:
-        """
-        Chuyển đổi segments thành danh sách boundaries
-        
-        Args:
-            segments: Danh sách các segment
-            
-        Returns:
-            List[float]: Danh sách thời điểm biên giới
-        """
-        boundaries = []
-        for segment in segments:
-            boundaries.append(segment['start'])
-        # Thêm điểm cuối của segment cuối cùng
-        if segments:
-            boundaries.append(segments[-1]['end'])
-        return sorted(list(set(boundaries)))  # Loại bỏ trùng lặp và sắp xếp
+    if not os.path.exists(test_dir):
+        return test_files
     
-    def predictions_to_boundaries(self, predictions: np.ndarray) -> List[float]:
-        """
-        Chuyển đổi dự đoán frame thành boundaries
-        
-        Args:
-            predictions: Mảng dự đoán cho mỗi frame
-            
-        Returns:
-            List[float]: Danh sách thời điểm biên giới
-        """
-        boundaries = [0.0]  # Bắt đầu từ 0
-        
-        for i in range(1, len(predictions)):
-            if predictions[i] != predictions[i-1]:
-                # Có sự thay đổi label -> tạo boundary
-                boundary_time = i * self.hop_size
-                boundaries.append(boundary_time)
-        
-        # Thêm boundary cuối
-        end_time = len(predictions) * self.hop_size
-        boundaries.append(end_time)
-        
-        return boundaries
+    # Ưu tiên các file cố định
+    priority_files = ['phone_F2.wav', 'phone_M2.wav', 'studio_F2.wav', 'studio_M2.wav']
     
-    def compute_boundary_error(self, true_boundaries: List[float], 
-                             pred_boundaries: List[float]) -> Dict:
-        """
-        Tính sai số giữa boundaries thực và dự đoán
+    # Tìm file theo thứ tự ưu tiên
+    for filename in priority_files:
+        wav_path = os.path.join(test_dir, filename)
+        lab_path = wav_path.replace('.wav', '.lab')
         
-        Args:
-            true_boundaries: Boundaries thực
-            pred_boundaries: Boundaries dự đoán
+        if os.path.exists(wav_path) and os.path.exists(lab_path):
+            test_files.append((wav_path, lab_path))
+    
+    # Nếu chưa đủ 4 file, tìm thêm file khác
+    if len(test_files) < 4:
+        all_wav_files = [f for f in os.listdir(test_dir) if f.endswith('.wav')]
+        
+        for filename in all_wav_files:
+            if filename not in priority_files:  # Bỏ qua file đã có
+                wav_path = os.path.join(test_dir, filename)
+                lab_path = wav_path.replace('.wav', '.lab')
+                
+                if os.path.exists(lab_path):
+                    test_files.append((wav_path, lab_path))
+                    
+                if len(test_files) >= 4:
+                    break
+    
+    return test_files[:4]  # Chỉ lấy tối đa 4 file
+
+
+def demo_classification_with_ground_truth(test_files, thresholds, results_dir):
+    """
+    Demo phân loại với ngưỡng tối ưu và so sánh với ground truth
+    
+    Args:
+        test_files: Danh sách file test
+        thresholds: Ngưỡng tối ưu
+        results_dir: Thư mục lưu kết quả
+    """
+    print("Bắt đầu demo phân loại với ngưỡng tối ưu...")
+    
+    # Khởi tạo classifier với ngưỡng tối ưu
+    classifier = SUVClassifier(
+        frame_length=thresholds['frame_length'],
+        frame_shift=thresholds['frame_shift'],
+        sr=16000
+    )
+    
+    # Set ngưỡng tối ưu
+    classifier.set_thresholds(
+        ste_threshold=thresholds['ste_threshold'],
+        zcr_threshold=thresholds['zcr_threshold'],
+        st_threshold=thresholds['st_threshold']
+    )
+    
+    # Khởi tạo evaluator
+    analyzer = AudioAnalyzer(
+        frame_length=thresholds['frame_length'],
+        frame_shift=thresholds['frame_shift'],
+        sr=16000
+    )
+    
+    # Xử lý từng file test với ground truth
+    for i, (wav_path, lab_path) in enumerate(test_files):
+        filename = os.path.basename(wav_path)
+        print(f"\nXử lý file {i+1}/{len(test_files)}: {filename}")
+        
+        try:
+            # Phân loại với ngưỡng tối ưu
+            audio, ste, zcr, st, predictions = classifier.classify(wav_path)
             
-        Returns:
-            Dict: Các metrics đánh giá
-        """
-        # Tính sai số cho mỗi boundary dự đoán
-        errors = []
-        
-        for pred_boundary in pred_boundaries[1:-1]:  # Bỏ boundary đầu và cuối
-            # Tìm boundary thực gần nhất
-            min_distance = float('inf')
-            for true_boundary in true_boundaries[1:-1]:
-                distance = abs(pred_boundary - true_boundary)
-                if distance < min_distance:
-                    min_distance = distance
+            # Làm mịn dự đoán
+            smoothed_predictions = classifier.smooth_predictions(predictions, min_segment_length=30)
             
-            errors.append(min_distance)
+            # Load ground truth từ file .lab
+            print(f"  Sử dụng ground truth: {os.path.basename(lab_path)}")
+            
+            segments = analyzer.load_labels(lab_path)
+            true_labels = analyzer.get_frame_labels(segments, len(audio))
+            
+            # Đảm bảo chiều dài khớp nhau
+            min_length = min(len(true_labels), len(smoothed_predictions))
+            true_labels = true_labels[:min_length]
+            smoothed_predictions = smoothed_predictions[:min_length]
+            
+            # Tính độ chính xác
+            accuracy = compute_accuracy_manual(true_labels, smoothed_predictions)
+            print(f"  Độ chính xác: {accuracy:.4f}")
+            
+            # Tính accuracy cho từng class
+            class_accuracies = compute_class_accuracies(true_labels, smoothed_predictions)
+            print(f"  Silence Acc: {class_accuracies[0]:.4f}, Voiced Acc: {class_accuracies[1]:.4f}, Unvoiced Acc: {class_accuracies[2]:.4f}")
+            
+            # Vẽ và so sánh với ground truth
+            plot_comparison_with_ground_truth(
+                audio=audio,
+                ste=ste,
+                zcr=zcr,
+                st=st,
+                predictions=predictions,
+                smoothed_predictions=smoothed_predictions,
+                true_labels=true_labels,
+                filename=filename,
+                thresholds=thresholds,
+                figure_position=i,
+                results_dir=results_dir
+            )
+            
+        except Exception as e:
+            print(f"  ✗ Lỗi xử lý {filename}: {e}")
+    
+    print("\n🎯 Demo phân loại với ground truth hoàn thành!")
+    plt.show()  # Hiển thị tất cả figure
+
+
+def compute_accuracy_manual(y_true, y_pred):
+    """
+    Tính accuracy thủ công thay thế sklearn
+    
+    Args:
+        y_true: Nhãn thực
+        y_pred: Nhãn dự đoán
         
-        if len(errors) == 0:
-            return {'mae': 0, 'rmse': 0, 'num_boundaries': 0}
+    Returns:
+        float: Accuracy
+    """
+    if len(y_true) != len(y_pred) or len(y_true) == 0:
+        return 0.0
+    
+    correct = sum(1 for true, pred in zip(y_true, y_pred) if true == pred)
+    return correct / len(y_true)
+
+
+def compute_class_accuracies(y_true, y_pred):
+    """
+    Tính accuracy cho từng class
+    
+    Args:
+        y_true: Nhãn thực
+        y_pred: Nhãn dự đoán
         
-        # Tính MAE và RMSE
-        mae = np.mean(errors)
-        rmse = np.sqrt(np.mean(np.array(errors)**2))
+    Returns:
+        List[float]: Accuracy cho từng class [silence, voiced, unvoiced]
+    """
+    class_accuracies = []
+    
+    for class_id in [0, 1, 2]:  # silence, voiced, unvoiced
+        mask = [true == class_id for true in y_true]
+        if sum(mask) > 0:
+            correct = sum(1 for i, (true, pred) in enumerate(zip(y_true, y_pred)) 
+                         if mask[i] and true == pred)
+            accuracy = correct / sum(mask)
+        else:
+            accuracy = 0.0
+        class_accuracies.append(accuracy)
+    
+    return class_accuracies
+
+
+def compute_f1_scores(y_true, y_pred):
+    """
+    Tính F1 score cho từng class
+    
+    Args:
+        y_true: Nhãn thực
+        y_pred: Nhãn dự đoán
         
-        return {
-            'mae': mae,
-            'rmse': rmse,
-            'num_boundaries': len(errors),
-            'errors': errors
+    Returns:
+        Dict: F1 scores cho từng class
+    """
+    classes = [0, 1, 2]  # Silence, Voiced, Unvoiced
+    class_names = ['Silence', 'Voiced', 'Unvoiced']
+    
+    f1_scores = {}
+    
+    for cls, name in zip(classes, class_names):
+        # True Positive: Dự đoán đúng class này
+        tp = sum(1 for true, pred in zip(y_true, y_pred) if true == cls and pred == cls)
+        
+        # False Positive: Dự đoán nhầm là class này
+        fp = sum(1 for true, pred in zip(y_true, y_pred) if true != cls and pred == cls)
+        
+        # False Negative: Bỏ sót class này
+        fn = sum(1 for true, pred in zip(y_true, y_pred) if true != cls and pred != cls)
+        
+        # Precision và Recall
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        
+        # F1 score
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        f1_scores[name] = f1
+    
+    return f1_scores
+
+
+def evaluate_single_file(classifier, wav_path, lab_path=None):
+    """
+    Đánh giá một file duy nhất
+    
+    Args:
+        classifier: SUVClassifier instance
+        wav_path: Đường dẫn file audio
+        lab_path: Đường dẫn file label (optional)
+        
+    Returns:
+        Dict: Kết quả đánh giá
+    """
+    # Phân loại
+    audio, ste, zcr, st, predictions = classifier.classify(wav_path)
+    smoothed_predictions = classifier.smooth_predictions(predictions, min_segment_length=30)
+    
+    result = {
+        'filename': os.path.basename(wav_path),
+        'total_frames': len(predictions),
+        'predictions': predictions,
+        'smoothed_predictions': smoothed_predictions,
+        'features': {
+            'ste': ste,
+            'zcr': zcr,
+            'st': st
         }
+    }
     
-    def compute_frame_accuracy(self, true_labels: np.ndarray, 
-                              pred_labels: np.ndarray) -> Dict:
-        """
-        Tính độ chính xác theo frame
+    # Nếu có ground truth
+    if lab_path and os.path.exists(lab_path):
+        analyzer = AudioAnalyzer(
+            frame_length=classifier.analyzer.frame_length,
+            frame_shift=classifier.analyzer.frame_shift,
+            sr=classifier.analyzer.sr
+        )
         
-        Args:
-            true_labels: Nhãn thực
-            pred_labels: Nhãn dự đoán
-            
-        Returns:
-            Dict: Các metrics độ chính xác
-        """
-        min_length = min(len(true_labels), len(pred_labels))
+        segments = analyzer.load_labels(lab_path)
+        true_labels = analyzer.get_frame_labels(segments, len(audio))
+        
+        # Đảm bảo chiều dài khớp nhau
+        min_length = min(len(true_labels), len(smoothed_predictions))
         true_labels = true_labels[:min_length]
-        pred_labels = pred_labels[:min_length]
+        smoothed_predictions = smoothed_predictions[:min_length]
         
-        # Tính accuracy tổng thể
-        overall_accuracy = np.mean(true_labels == pred_labels)
+        # Tính các metric
+        accuracy = compute_accuracy_manual(true_labels, smoothed_predictions)
+        class_accuracies = compute_class_accuracies(true_labels, smoothed_predictions)
+        f1_scores = compute_f1_scores(true_labels, smoothed_predictions)
         
-        # Tính accuracy cho từng class
-        class_accuracies = {}
-        for class_id, class_name in [(0, 'silence'), (1, 'voiced'), (2, 'unvoiced')]:
-            mask = true_labels == class_id
-            if np.sum(mask) > 0:
-                class_acc = np.mean(pred_labels[mask] == class_id)
-                class_accuracies[class_name] = class_acc
+        result.update({
+            'has_ground_truth': True,
+            'true_labels': true_labels,
+            'accuracy': accuracy,
+            'class_accuracies': {
+                'silence': class_accuracies[0],
+                'voiced': class_accuracies[1],
+                'unvoiced': class_accuracies[2]
+            },
+            'f1_scores': f1_scores
+        })
+    else:
+        result['has_ground_truth'] = False
+    
+    return result
+
+
+def save_evaluation_results(results, results_dir):
+    """
+    Lưu kết quả đánh giá vào file
+    
+    Args:
+        results: List các kết quả đánh giá
+        results_dir: Thư mục lưu kết quả
+    """
+    report_file = os.path.join(results_dir, "evaluation_report.txt")
+    
+    with open(report_file, 'w', encoding='utf-8') as f:
+        f.write("=== BÁO CÁO ĐÁNH GIÁ SUV CLASSIFICATION ===\n\n")
+        
+        total_accuracy = 0
+        total_files = 0
+        
+        for result in results:
+            f.write(f"FILE: {result['filename']}\n")
+            f.write(f"Tổng số frames: {result['total_frames']}\n")
+            
+            if result['has_ground_truth']:
+                f.write(f"Độ chính xác tổng thể: {result['accuracy']:.4f}\n")
+                f.write(f"Accuracy theo class:\n")
+                f.write(f"  - Silence: {result['class_accuracies']['silence']:.4f}\n")
+                f.write(f"  - Voiced: {result['class_accuracies']['voiced']:.4f}\n")
+                f.write(f"  - Unvoiced: {result['class_accuracies']['unvoiced']:.4f}\n")
+                f.write(f"F1 scores:\n")
+                for class_name, f1 in result['f1_scores'].items():
+                    f.write(f"  - {class_name}: {f1:.4f}\n")
+                
+                total_accuracy += result['accuracy']
+                total_files += 1
             else:
-                class_accuracies[class_name] = 0.0
+                f.write("Không có ground truth để đánh giá\n")
+            
+            f.write("\n" + "-"*50 + "\n")
         
-        return {
-            'overall_accuracy': overall_accuracy,
-            'class_accuracies': class_accuracies,
-            'total_frames': min_length
-        }
+        if total_files > 0:
+            f.write(f"\nTÓM TẮT:\n")
+            f.write(f"Độ chính xác trung bình: {total_accuracy/total_files:.4f}\n")
+            f.write(f"Số file có ground truth: {total_files}\n")
     
-    def plot_results(self, audio: np.ndarray, ste: np.ndarray, zcr: np.ndarray,
-                    true_labels: np.ndarray, pred_labels: np.ndarray,
-                    true_boundaries: List[float], pred_boundaries: List[float],
-                    title: str, save_path: str, st: np.ndarray = None):
-        """
-        Vẽ kết quả phân loại SUVDA
-        
-        Args:
-            audio: Tín hiệu âm thanh
-            ste: Short-time Energy
-            zcr: Zero Crossing Rate
-            true_labels: Nhãn thực
-            pred_labels: Nhãn dự đoán
-            true_boundaries: Boundaries thực
-            pred_boundaries: Boundaries dự đoán
-            title: Tiêu đề biểu đồ
-            save_path: Đường dẫn lưu hình
-            st: Spectrum Tilt (optional)
-        """
-        # Điều chỉnh số subplot dựa trên có ST hay không
-        num_plots = 6 if st is not None else 5
-        fig, axes = plt.subplots(num_plots, 1, figsize=(15, 14 if st is not None else 12))
-        
-        # Thời gian cho audio
-        time_audio = np.arange(len(audio)) / self.sr
-        
-        # Thời gian cho features
-        time_features = np.arange(len(ste)) * self.hop_size
-        
-        # 1. Tín hiệu âm thanh gốc
-        axes[0].plot(time_audio, audio, 'b-', alpha=0.7)
-        axes[0].set_title(f'{title} - Tín hiệu âm thanh gốc')
-        axes[0].set_ylabel('Amplitude')
-        axes[0].grid(True, alpha=0.3)
-        
-        # Vẽ boundaries thực (đỏ) và dự đoán (xanh)
-        for boundary in true_boundaries:
-            axes[0].axvline(x=boundary, color='red', linestyle='-', alpha=0.7, label='Ground Truth')
-        for boundary in pred_boundaries:
-            axes[0].axvline(x=boundary, color='blue', linestyle='--', alpha=0.7, label='Predicted')
-        
-        # 2. STE
-        axes[1].plot(time_features, ste, 'g-', linewidth=1.5)
-        axes[1].set_title('Short-time Energy (STE)')
-        axes[1].set_ylabel('Normalized STE')
-        axes[1].grid(True, alpha=0.3)
-        
-        # 3. ZCR
-        axes[2].plot(time_features, zcr, 'm-', linewidth=1.5)
-        axes[2].set_title('Zero Crossing Rate (ZCR)')
-        axes[2].set_ylabel('ZCR')
-        axes[2].grid(True, alpha=0.3)
-        
-        # 4. Spectrum Tilt (nếu có)
-        plot_idx = 3
-        if st is not None:
-            axes[plot_idx].plot(time_features[:len(st)], st, 'orange', linewidth=1.5)
-            axes[plot_idx].set_title('Spectrum Tilt (ST) - SUVDA')
-            axes[plot_idx].set_ylabel('ST')
-            axes[plot_idx].grid(True, alpha=0.3)
-            axes[plot_idx].axhline(y=0.7, color='red', linestyle='--', alpha=0.7, label='Threshold=0.7')
-            axes[plot_idx].legend()
-            plot_idx += 1
-        
-        # Nhãn thực
-        axes[plot_idx].plot(time_features[:len(true_labels)], true_labels, 'r-', linewidth=2, label='Ground Truth')
-        axes[plot_idx].set_title('Nhãn thực (Ground Truth)')
-        axes[plot_idx].set_ylabel('Label (0:sil, 1:v, 2:uv)')
-        axes[plot_idx].set_ylim(-0.5, 2.5)
-        axes[plot_idx].grid(True, alpha=0.3)
-        plot_idx += 1
-        
-        # So sánh nhãn thực vs dự đoán
-        min_len = min(len(true_labels), len(pred_labels))
-        axes[plot_idx].plot(time_features[:min_len], true_labels[:min_len], 'r-', linewidth=2, label='Ground Truth')
-        axes[plot_idx].plot(time_features[:min_len], pred_labels[:min_len], 'b--', linewidth=2, alpha=0.7, label='Predicted')
-        axes[plot_idx].set_title('So sánh: Ground Truth vs Predicted (SUVDA)')
-        axes[plot_idx].set_xlabel('Thời gian (s)')
-        axes[plot_idx].set_ylabel('Label (0:sil, 1:v, 2:uv)')
-        axes[plot_idx].set_ylim(-0.5, 2.5)
-        axes[plot_idx].legend()
-        axes[plot_idx].grid(True, alpha=0.3)
-        
-        # Vẽ boundaries cho tất cả subplot
-        for i in range(num_plots):
-            for boundary in true_boundaries:
-                axes[i].axvline(x=boundary, color='red', linestyle='-', alpha=0.3)
-            for boundary in pred_boundaries:
-                axes[i].axvline(x=boundary, color='blue', linestyle='--', alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.show()
-        
-        print(f"Đã lưu kết quả vào: {save_path}")
-    
-    def generate_report(self, results: List[Dict]) -> str:
-        """
-        Tạo báo cáo tổng hợp
-        
-        Args:
-            results: Danh sách kết quả đánh giá
-            
-        Returns:
-            str: Nội dung báo cáo
-        """
-        report = "=== BÁO CÁO ĐÁNH GIÁ PHÂN LOẠI SUV ===\\n\\n"
-        
-        total_mae = []
-        total_rmse = []
-        total_accuracy = []
-        
-        for i, result in enumerate(results):
-            filename = result.get('filename', f'File {i+1}')
-            boundary_metrics = result.get('boundary_metrics', {})
-            frame_metrics = result.get('frame_metrics', {})
-            
-            report += f"File: {filename}\\n"
-            report += f"  Boundary Error - MAE: {boundary_metrics.get('mae', 0):.4f}s, RMSE: {boundary_metrics.get('rmse', 0):.4f}s\\n"
-            report += f"  Frame Accuracy: {frame_metrics.get('overall_accuracy', 0):.4f}\\n"
-            
-            class_acc = frame_metrics.get('class_accuracies', {})
-            report += f"  Class Accuracies - Silence: {class_acc.get('silence', 0):.4f}, "
-            report += f"Voiced: {class_acc.get('voiced', 0):.4f}, Unvoiced: {class_acc.get('unvoiced', 0):.4f}\\n\\n"
-            
-            if boundary_metrics.get('mae') is not None:
-                total_mae.append(boundary_metrics['mae'])
-            if boundary_metrics.get('rmse') is not None:
-                total_rmse.append(boundary_metrics['rmse'])
-            if frame_metrics.get('overall_accuracy') is not None:
-                total_accuracy.append(frame_metrics['overall_accuracy'])
-        
-        # Tính trung bình
-        if total_mae:
-            report += f"TRUNG BÌNH:\\n"
-            report += f"  Boundary Error - MAE: {np.mean(total_mae):.4f}s, RMSE: {np.mean(total_rmse):.4f}s\\n"
-            report += f"  Frame Accuracy: {np.mean(total_accuracy):.4f}\\n"
-        
-        return report
+    print(f"Đã lưu báo cáo đánh giá: {report_file}")
