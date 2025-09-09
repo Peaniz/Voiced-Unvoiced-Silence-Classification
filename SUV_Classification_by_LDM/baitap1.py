@@ -351,12 +351,18 @@ if __name__=="__main__":
         ("TinHieuHuanLuyen/studio_F1.wav", "TinHieuHuanLuyen/studio_F1.lab"),
         ("TinHieuHuanLuyen/studio_M1.wav", "TinHieuHuanLuyen/studio_M1.lab"),
     ]
+    testfiles = [
+        ("TinHieuHuanLuyen/phone_F1.wav", "TinHieuHuanLuyen/phone_F1.lab"),
+        ("TinHieuHuanLuyen/phone_M1.wav", "TinHieuHuanLuyen/phone_M1.lab"),
+        ("TinHieuHuanLuyen/studio_F1.wav", "TinHieuHuanLuyen/studio_F1.lab"),
+        ("TinHieuHuanLuyen/studio_M1.wav", "TinHieuHuanLuyen/studio_M1.lab"),
+    ]
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
     # Huấn luyện threshold
     thr_opt = optimize_thresholds(files)
 
     # Test từng file
-    for i, (wav, lab) in enumerate(files, 1):
+    for i, (wav, lab) in enumerate(testfiles, 1):
         save_name = os.path.join(BASE_DIR, f"result_{i}.png")
         test_file(wav, lab, thr_opt, save_png=save_name)
