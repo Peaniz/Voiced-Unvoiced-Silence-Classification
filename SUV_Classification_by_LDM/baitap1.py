@@ -3,9 +3,10 @@ import librosa
 import matplotlib.pyplot as plt
 from scipy.signal import butter, lfilter
 import os
+from itertools import product
 
 # =========================
-# 1) Linear Delta Modulation (LDM)
+# 1) LDM encode/decode
 # =========================
 def ldm_encode(x, step=0.02, x0=0.0):
     x = np.asarray(x, dtype=np.float64)
@@ -78,43 +79,26 @@ def extract_features(bits, y_dec_bp, fs, frame_ms=25, hop_ms=10):
     return feats, times, win, hop
 
 # =========================
-# 4) Adaptive thresholds
-# =========================
-def adaptive_thresholds(feats):
-    bar, zcr, eng = feats[:,0], feats[:,1], feats[:,2]
-    return dict(
-        bar_lo = np.percentile(bar, 40),
-        bar_hi = np.percentile(bar, 60),
-        zcr_lo = np.percentile(zcr, 40),
-        zcr_hi = np.percentile(zcr, 70),
-        eng_sil = np.percentile(eng, 30)
-
-    )
-
-# =========================
-# 5) Frame classification
+# 4) Frame classification
 # =========================
 def classify_frames(feats, thr):
     bar, zcr, eng = feats[:,0], feats[:,1], feats[:,2]
     labels = np.empty(len(feats), dtype='<U1')
 
-    # Silence
     SIL_ABS = -40
     sil_mask = (eng <= thr['eng_sil']) | (eng <= SIL_ABS)
     labels[sil_mask] = 'S'
 
-    # Voiced
     voiced_mask = (~sil_mask) & (bar <= thr['bar_lo']) & (zcr <= thr['zcr_lo'])
     labels[voiced_mask] = 'V'
 
-    # Unvoiced
     unvoiced_mask = (~sil_mask) & (~voiced_mask)
     labels[unvoiced_mask] = 'U'
 
     return labels
 
 # =========================
-# 6) Segment reconstruction
+# 5) Segment reconstruction
 # =========================
 def intervals_from_labels(times, labels, hop_ms):
     hop_sec = hop_ms/1000.0
@@ -128,7 +112,7 @@ def intervals_from_labels(times, labels, hop_ms):
     return segs
 
 # =========================
-# 7) Load reference labels
+# 6) Load reference labels
 # =========================
 def load_label_file(label_path):
     segs = []
@@ -147,7 +131,7 @@ def load_label_file(label_path):
     return segs
 
 # =========================
-# 8) MAE between boundaries
+# 7) MAE between boundaries
 # =========================
 def boundary_mae(segs_pred, segs_ref):
     b_pred = []
@@ -169,7 +153,7 @@ def boundary_mae(segs_pred, segs_ref):
     return float(np.mean(dists)), b_pred, b_ref
 
 # =========================
-# 9) Visualization (modified)
+# 8) Visualization
 # =========================
 def label_to_num(lab):
     if lab == 'S': return 0
@@ -190,7 +174,7 @@ def expand_segments(segs, hop_ms, fs, total_len):
 def plot_suving(x, fs, times, labels, feats, segs_pred, segs_ref=None, thr=None, hop_ms=10, save_png='suving_result.png'):
     plt.figure(figsize=(14,12))
 
-    # --- 1) Waveform only ---
+    # Waveform
     ax1 = plt.subplot(5,1,1)
     t = np.arange(len(x))/fs
     ax1.plot(t, x, color='black')
@@ -198,7 +182,7 @@ def plot_suving(x, fs, times, labels, feats, segs_pred, segs_ref=None, thr=None,
     ax1.set_xlabel('Time (s)')
     ax1.set_ylabel('Amplitude')
 
-    # --- 2) Segmentation comparison ---
+    # Segmentation
     ax2 = plt.subplot(5,1,2)
     pred_arr = expand_segments(segs_pred, hop_ms, fs, len(x))
     t_frames = np.arange(len(pred_arr)) * (hop_ms/1000.0)
@@ -213,35 +197,35 @@ def plot_suving(x, fs, times, labels, feats, segs_pred, segs_ref=None, thr=None,
     ax2.set_yticklabels(['S','U','V'])
     ax2.legend()
 
-    # --- 3) Feature plots ---
+    # Feature plots
     bar, zcr, eng = feats[:,0], feats[:,1], feats[:,2]
 
     ax3 = plt.subplot(5,1,3)
-    ax3.plot(times, bar)
+    ax3.plot(times, bar, label='BAR')
     ax3.set_ylabel('BAR')
     ax3.set_title('Bit Alternation Rate')
     if thr is not None:
-        ax3.axhline(thr.get('bar_lo', np.nan), linestyle='--', label='bar_lo')
-        ax3.axhline(thr.get('bar_hi', np.nan), linestyle=':', label='bar_hi')
+        ax3.axhline(thr.get('bar_lo', np.nan), linestyle='--', color='green', label='bar_lo')
+        ax3.axhline(thr.get('bar_hi', np.nan), linestyle=':', color='green', label='bar_hi')
         ax3.legend()
 
     ax4 = plt.subplot(5,1,4)
-    ax4.plot(times, zcr)
+    ax4.plot(times, zcr, label='ZCR')
     ax4.set_ylabel('ZCR')
     ax4.set_title('Zero Crossing Rate')
     if thr is not None:
-        ax4.axhline(thr.get('zcr_lo', np.nan), linestyle='--', label='zcr_lo')
-        ax4.axhline(thr.get('zcr_hi', np.nan), linestyle=':', label='zcr_hi')
+        ax4.axhline(thr.get('zcr_lo', np.nan), linestyle='--', color='purple', label='zcr_lo')
+        ax4.axhline(thr.get('zcr_hi', np.nan), linestyle=':', color='purple', label='zcr_hi')
         ax4.legend()
 
     ax5 = plt.subplot(5,1,5)
-    ax5.plot(times, eng)
+    ax5.plot(times, eng, label='Energy (dB)')
     ax5.set_ylabel('Energy (dB)')
     ax5.set_xlabel('Time (s)')
     ax5.set_title('Short-time Log Energy')
     if thr is not None:
-        ax5.axhline(thr.get('eng_sil', np.nan), linestyle='--', label='eng_sil (adaptive)')
-        ax5.axhline(-40, linestyle=':', label='SIL_ABS = -40 dB')
+        ax5.axhline(thr.get('eng_sil', np.nan), linestyle='--', color='orange', label='eng_sil (trained)')
+        ax5.axhline(-40, linestyle=':', color='red', label='SIL_ABS=-40dB')
         ax5.legend()
 
     plt.tight_layout()
@@ -249,27 +233,116 @@ def plot_suving(x, fs, times, labels, feats, segs_pred, segs_ref=None, thr=None,
     plt.show()
 
 # =========================
-# 10) Full pipeline
+# 9) Labels utility
 # =========================
-def suving_pipeline(wav_path, label_path, frame_ms=25, hop_ms=10, ldm_step=0.02, target_fs=16000, save_png='suving_result.png'):
+def labels_from_file(label_path, times, hop_ms):
+    segs = load_label_file(label_path)
+    arr = np.empty(len(times), dtype='<U1')
+    idx = 0
+    for s,e,L in segs:
+        while idx < len(times) and times[idx] < s:
+            arr[idx] = 'S'
+            idx +=1
+        while idx < len(times) and times[idx] <= e:
+            arr[idx] = L
+            idx +=1
+    while idx < len(times):
+        arr[idx] = 'S'
+        idx +=1
+    return arr
+
+def frame_mae(pred_labels, ref_labels):
+    diff = pred_labels != ref_labels
+    return np.mean(diff)
+
+# =========================
+# 10) Trực quan hóa threshold
+# =========================
+def visualize_thresholds(features, thr):
+    bar, zcr, eng = features[:,0], features[:,1], features[:,2]
+
+    plt.figure(figsize=(14,4))
+
+    plt.subplot(1,3,1)
+    plt.hist(bar, bins=50, color='skyblue', alpha=0.7)
+    plt.axvline(thr['bar_lo'], color='green', linestyle='--', label='bar_lo')
+    plt.axvline(thr['bar_hi'], color='green', linestyle=':', label='bar_hi')
+    plt.title('BAR distribution with thresholds'); plt.xlabel('BAR'); plt.ylabel('Count'); plt.legend()
+
+    plt.subplot(1,3,2)
+    plt.hist(zcr, bins=50, color='plum', alpha=0.7)
+    plt.axvline(thr['zcr_lo'], color='purple', linestyle='--', label='zcr_lo')
+    plt.axvline(thr['zcr_hi'], color='purple', linestyle=':', label='zcr_hi')
+    plt.title('ZCR distribution with thresholds'); plt.xlabel('ZCR'); plt.ylabel('Count'); plt.legend()
+
+    plt.subplot(1,3,3)
+    plt.hist(eng, bins=50, color='orange', alpha=0.7)
+    plt.axvline(thr['eng_sil'], color='red', linestyle='--', label='eng_sil')
+    plt.title('Energy distribution with thresholds'); plt.xlabel('Energy (dB)'); plt.ylabel('Count'); plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+# =========================
+# 11) Grid search threshold
+# =========================
+def optimize_thresholds(files, frame_ms=25, hop_ms=10, ldm_step=0.02, target_fs=16000):
+    all_feats = []
+    all_labels = []
+
+    for wav_path, lab_path in files:
+        x, fs = librosa.load(wav_path, sr=target_fs, mono=True)
+        x = x / (np.max(np.abs(x)) + 1e-12)
+        bits, y_dec = ldm_encode(x, step=ldm_step)
+        y_dec_bp = bandpass_filter(y_dec, fs)
+        feats, times, win, hop = extract_features(bits, y_dec_bp, fs, frame_ms, hop_ms)
+        labels = labels_from_file(lab_path, times, hop_ms)
+        all_feats.append(feats)
+        all_labels.append(labels)
+
+    all_feats = np.vstack(all_feats)
+    all_labels = np.concatenate(all_labels)
+
+    bar_lo_range = np.linspace(0.1, 0.9, 5)
+    zcr_lo_range = np.linspace(0.01, 0.3, 5)
+    eng_sil_range = np.linspace(-50, -20, 5)
+
+    best_mae = 1.0
+    best_thr = None
+
+    for bar_lo, zcr_lo, eng_sil in product(bar_lo_range, zcr_lo_range, eng_sil_range):
+        thr = dict(bar_lo=bar_lo, zcr_lo=zcr_lo, eng_sil=eng_sil)
+        thr['bar_hi'] = min(bar_lo+0.2,1.0)
+        thr['zcr_hi'] = min(zcr_lo+0.2,1.0)
+        labels_pred = classify_frames(all_feats, thr)
+        mae = frame_mae(labels_pred, all_labels)
+        if mae < best_mae:
+            best_mae = mae
+            best_thr = thr
+
+    print("Training MAE:", best_mae)
+    visualize_thresholds(all_feats, best_thr)
+    return best_thr
+
+# =========================
+# 12) Test file
+# =========================
+def test_file(wav_path, lab_path, thr, frame_ms=25, hop_ms=10, ldm_step=0.02, target_fs=16000, save_png='suving_result.png'):
     x, fs = librosa.load(wav_path, sr=target_fs, mono=True)
-    x = x / (np.max(np.abs(x))+1e-12)
-
+    x = x / (np.max(np.abs(x)) + 1e-12)
     bits, y_dec = ldm_encode(x, step=ldm_step)
-    y_dec_bp = bandpass_filter(y_dec, fs, 300.0, 3400.0)
-
+    y_dec_bp = bandpass_filter(y_dec, fs)
     feats, times, win, hop = extract_features(bits, y_dec_bp, fs, frame_ms, hop_ms)
-    thr = adaptive_thresholds(feats)
     labels = classify_frames(feats, thr)
     segs_pred = intervals_from_labels(times, labels, hop_ms)
-
-    segs_ref = load_label_file(label_path)
+    segs_ref = load_label_file(lab_path)
     mae, b_pred, b_ref = boundary_mae(segs_pred, segs_ref)
-
-    return x, fs, times, labels, feats, segs_pred, segs_ref, thr, mae, b_pred, b_ref
+    plot_suving(x, fs, times, labels, feats, segs_pred, segs_ref, thr, hop_ms, save_png)
+    print(f"File: {wav_path}, MAE = {mae:.3f} sec")
+    return mae
 
 # =========================
-# 11) Example run
+# 13) Main
 # =========================
 if __name__=="__main__":
     files = [
@@ -279,16 +352,11 @@ if __name__=="__main__":
         ("TinHieuHuanLuyen/studio_M1.wav", "TinHieuHuanLuyen/studio_M1.lab"),
     ]
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+    # Huấn luyện threshold
+    thr_opt = optimize_thresholds(files)
+
+    # Test từng file
     for i, (wav, lab) in enumerate(files, 1):
         save_name = os.path.join(BASE_DIR, f"result_{i}.png")
-        x, fs, times, labels, feats, segs_pred, segs_ref, thr, mae, b_pred, b_ref = suving_pipeline(
-            wav, lab, save_png=save_name
-        )
-        
-        # gọi thêm hàm plot để vẽ và lưu biểu đồ
-        plot_suving(
-            x, fs, times, labels, feats, segs_pred, segs_ref, thr,
-            save_png=save_name
-        )
-        
-        print(f"Result {i}: MAE = {mae:.3f} sec (saved {save_name})")
+        test_file(wav, lab, thr_opt, save_png=save_name)
