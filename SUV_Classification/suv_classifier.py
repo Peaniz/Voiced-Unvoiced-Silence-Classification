@@ -7,7 +7,7 @@ from audio_analyzer import AudioAnalyzer
 
 class SUVClassifier:
     """
-    Lớp phân loại Speech/Unvoiced/Voiced (SUV) sử dụng STE và ZCR
+    Lớp phân loại Speech/Unvoiced/Voiced (SUV) sử dụng STE, ZCR và ST với ground truth
     """
     
     def __init__(self, frame_length=0.025, frame_shift=0.01, sr=16000):
@@ -25,239 +25,187 @@ class SUVClassifier:
         self.st_thresholds = {'speech_silence': 0, 'voiced_unvoiced': 0.7}  # Default SUVDA
         self.trained = False
         
-    def train(self, training_files: Union[List[str], List[Tuple[str, str]]]) -> Dict:
+    def train(self, training_files: List[Tuple[str, str]]) -> Dict:
         """
-        Huấn luyện DYNAMIC THRESHOLD theo bài báo (không cần ground truth)
+        Huấn luyện classifier với ground truth từ file lab
         
         Args:
-            training_files: List audio files (wav_path) hoặc (wav_path, lab_path) - chỉ dùng wav
+            training_files: List of (wav_path, lab_path) tuples
             
         Returns:
-            Dict: Thống kê và ngưỡng dynamic tìm được
+            Dict: Thống kê training và ngưỡng tìm được
         """
-        print("=== DYNAMIC THRESHOLD TRAINING (UNSUPERVISED) ===")
-        print("Theo bài báo: T = (W × M1 + M2) / (W + 1)")
+        print("=== TRAINING SUV CLASSIFIER VỚI GROUND TRUTH ===")
         
+        # Thu thập features và labels từ tất cả file
         all_ste_values = []
         all_zcr_values = []
         all_st_values = []
+        all_labels = []
         
-        # Chuẩn hóa input (chỉ lấy wav paths)
-        wav_files = []
-        if isinstance(training_files[0], tuple):
-            wav_files = [wav_path for wav_path, _ in training_files]
-        else:
-            wav_files = training_files
+        print(f"Thu thập features và labels từ {len(training_files)} file...")
         
-        print(f"Thu thập features từ {len(wav_files)} file audio...")
-        
-        for wav_path in wav_files:
+        for wav_path, lab_path in training_files:
             print(f"Xử lý file: {wav_path}")
             
-            # Chỉ load audio, không cần ground truth
+            # Load audio và ground truth
             audio, _ = self.analyzer.load_audio(wav_path)
+            segments = self.analyzer.load_labels(lab_path)
             
-            # Tính STE, ZCR và ST
+            # Tính features
             ste = self.analyzer.compute_ste(audio)
             zcr = self.analyzer.compute_zcr(audio)
             st = self.analyzer.compute_spectrum_tilt(audio)
             
-            # Thu thập tất cả giá trị (không phân loại theo ground truth)
+            # Tạo frame labels từ segments
+            frame_labels = self.analyzer.get_frame_labels(segments, len(audio))
+            
+            # Đảm bảo chiều dài khớp nhau
+            min_length = min(len(ste), len(zcr), len(st), len(frame_labels))
+            ste = ste[:min_length]
+            zcr = zcr[:min_length]
+            st = st[:min_length]
+            frame_labels = frame_labels[:min_length]
+            
+            # Thu thập features và labels
             all_ste_values.extend(ste)
             all_zcr_values.extend(zcr)
             all_st_values.extend(st)
+            all_labels.extend(frame_labels)
         
-        print(f"Tổng cộng thu thập: {len(all_ste_values)} frames")
+        print(f"Tổng cộng thu thập: {len(all_labels)} frames với ground truth")
         
-        # Tính DYNAMIC THRESHOLDS theo công thức T = (W × M1 + M2) / (W + 1)
-        dynamic_stats = self._compute_dynamic_thresholds(
-            all_ste_values, all_zcr_values, all_st_values
+        # Chuyển sang numpy arrays
+        ste_array = np.array(all_ste_values)
+        zcr_array = np.array(all_zcr_values)
+        st_array = np.array(all_st_values)
+        labels_array = np.array(all_labels)
+        
+        # Tính ngưỡng dựa trên ground truth
+        training_stats = self._compute_supervised_thresholds(
+            ste_array, zcr_array, st_array, labels_array
         )
         
         self.trained = True
         
-        print(f"\\n=== NGUONG DYNAMIC (UNSUPERVISED) ===")
+        print(f"\\n=== NGƯỠNG TỪ GROUND TRUTH ===")
         print(f"Energy Threshold (STE): {self.ste_thresholds['speech_silence']:.6f}")
         print(f"ZCR Threshold: {self.zcr_thresholds['voiced_unvoiced']:.6f}")
         print(f"Spectrum Tilt Threshold: {self.st_thresholds['voiced_unvoiced']:.6f}")
         
         return {
-            'dynamic_stats': dynamic_stats,
+            'training_stats': training_stats,
             'ste_thresholds': self.ste_thresholds,
             'zcr_thresholds': self.zcr_thresholds,
             'st_thresholds': self.st_thresholds
         }
     
-    def _compute_dynamic_thresholds(self, ste_values: List[float], zcr_values: List[float], st_values: List[float]):
+    def _compute_supervised_thresholds(self, ste_values: np.ndarray, zcr_values: np.ndarray, 
+                                     st_values: np.ndarray, labels: np.ndarray) -> Dict:
         """
-        Tính DYNAMIC THRESHOLDS theo công thức bài báo: T = (W × M1 + M2) / (W + 1)
+        Tính ngưỡng dựa trên ground truth labels
         
         Args:
-            ste_values: Tất cả giá trị STE từ audio files
-            zcr_values: Tất cả giá trị ZCR từ audio files  
-            st_values: Tất cả giá trị ST từ audio files
+            ste_values: STE features
+            zcr_values: ZCR features  
+            st_values: ST features
+            labels: Ground truth labels (0=silence, 1=voiced, 2=unvoiced)
             
         Returns:
-            Dict: Thống kê histogram và threshold dynamics
+            Dict: Training statistics
         """
-        print("\\n=== DYNAMIC THRESHOLD COMPUTATION ===")
+        print("\\n=== SUPERVISED THRESHOLD COMPUTATION ===")
         
-        # Convert to numpy arrays
-        ste_array = np.array(ste_values)
-        zcr_array = np.array(zcr_values)
-        st_array = np.array(st_values)
+        # Tách features theo class
+        silence_mask = (labels == 0)
+        voiced_mask = (labels == 1)
+        unvoiced_mask = (labels == 2)
+        speech_mask = (labels == 1) | (labels == 2)  # voiced + unvoiced
         
-        # Tính dynamic threshold cho từng feature
-        ste_threshold, ste_hist_stats = self._dynamic_threshold_single_feature(
-            ste_array, "STE (Short-time Energy)", W=1.0
-        )
+        print(f"Class distribution:")
+        print(f"  Silence: {np.sum(silence_mask)} frames ({np.sum(silence_mask)/len(labels)*100:.1f}%)")
+        print(f"  Voiced: {np.sum(voiced_mask)} frames ({np.sum(voiced_mask)/len(labels)*100:.1f}%)")
+        print(f"  Unvoiced: {np.sum(unvoiced_mask)} frames ({np.sum(unvoiced_mask)/len(labels)*100:.1f}%)")
         
-        zcr_threshold, zcr_hist_stats = self._dynamic_threshold_single_feature(
-            zcr_array, "ZCR (Zero Crossing Rate)", W=0.8
-        )
+        # 1. STE Threshold: Tách silence vs speech
+        silence_ste = ste_values[silence_mask]
+        speech_ste = ste_values[speech_mask]
         
-        st_threshold, st_hist_stats = self._dynamic_threshold_single_feature(
-            st_array, "ST (Spectrum Tilt)", W=1.2
-        )
+        if len(silence_ste) > 0 and len(speech_ste) > 0:
+            # Optimal threshold: điểm giữa 95th percentile silence và 5th percentile speech
+            silence_95th = np.percentile(silence_ste, 95)
+            speech_5th = np.percentile(speech_ste, 5)
+            ste_threshold = (silence_95th + speech_5th) / 2
+        else:
+            ste_threshold = np.percentile(ste_values, 25)
         
-        # Set computed thresholds
         self.ste_thresholds['speech_silence'] = ste_threshold
-        self.ste_thresholds['voiced_unvoiced'] = 0
         
-        self.zcr_thresholds['voiced_unvoiced'] = zcr_threshold  
-        self.zcr_thresholds['speech_silence'] = 0
+        # 2. ZCR Threshold: Tách voiced vs unvoiced (chỉ trong speech)
+        voiced_zcr = zcr_values[voiced_mask]
+        unvoiced_zcr = zcr_values[unvoiced_mask]
         
-        self.st_thresholds['voiced_unvoiced'] = max(0.3, min(0.9, st_threshold))  # Clamp ST
-        self.st_thresholds['speech_silence'] = 0
+        if len(voiced_zcr) > 0 and len(unvoiced_zcr) > 0:
+            # Optimal threshold: điểm giữa 95th percentile voiced và 5th percentile unvoiced
+            voiced_95th = np.percentile(voiced_zcr, 95)
+            unvoiced_5th = np.percentile(unvoiced_zcr, 5)
+            zcr_threshold = (voiced_95th + unvoiced_5th) / 2
+        else:
+            zcr_threshold = np.median(zcr_values)
         
-        print(f"\\n=== KET QUA DYNAMIC THRESHOLDS ===")
-        print(f"T_STE = {ste_threshold:.6f} (Speech/Silence separation)")
-        print(f"T_ZCR = {zcr_threshold:.6f} (Voiced/Unvoiced discrimination)")
-        print(f"T_ST = {self.st_thresholds['voiced_unvoiced']:.6f} (Voiced/Unvoiced discrimination)")
+        self.zcr_thresholds['voiced_unvoiced'] = zcr_threshold
         
-        return {
-            'ste': ste_hist_stats,
-            'zcr': zcr_hist_stats,
-            'st': st_hist_stats,
-            'feature_stats': {
-                'ste': {'mean': np.mean(ste_array), 'std': np.std(ste_array), 'min': np.min(ste_array), 'max': np.max(ste_array)},
-                'zcr': {'mean': np.mean(zcr_array), 'std': np.std(zcr_array), 'min': np.min(zcr_array), 'max': np.max(zcr_array)},
-                'st': {'mean': np.mean(st_array), 'std': np.std(st_array), 'min': np.min(st_array), 'max': np.max(st_array)}
+        # 3. ST Threshold: Tách voiced vs unvoiced (spectrum tilt)
+        voiced_st = st_values[voiced_mask]
+        unvoiced_st = st_values[unvoiced_mask]
+        
+        if len(voiced_st) > 0 and len(unvoiced_st) > 0:
+            # Voiced có ST cao hơn (năng lượng ở tần số thấp), unvoiced có ST thấp hơn
+            voiced_5th = np.percentile(voiced_st, 5)  # 5th percentile của voiced
+            unvoiced_95th = np.percentile(unvoiced_st, 95)  # 95th percentile của unvoiced
+            st_threshold = (voiced_5th + unvoiced_95th) / 2
+        else:
+            st_threshold = 0.7  # Default từ bài báo
+        
+        # Clamp ST threshold vào khoảng hợp lý
+        st_threshold = max(0.3, min(0.9, st_threshold))
+        self.st_thresholds['voiced_unvoiced'] = st_threshold
+        
+        print(f"\\nComputed thresholds:")
+        print(f"  STE (Speech/Silence): {ste_threshold:.6f}")
+        print(f"  ZCR (Voiced/Unvoiced): {zcr_threshold:.6f}")
+        print(f"  ST (Voiced/Unvoiced): {st_threshold:.6f}")
+        
+        # Thống kê chi tiết
+        training_stats = {
+            'class_distribution': {
+                'silence': int(np.sum(silence_mask)),
+                'voiced': int(np.sum(voiced_mask)),
+                'unvoiced': int(np.sum(unvoiced_mask))
+            },
+            'feature_statistics': {
+                'ste': {
+                    'silence': {'mean': np.mean(silence_ste) if len(silence_ste) > 0 else 0,
+                               'std': np.std(silence_ste) if len(silence_ste) > 0 else 0},
+                    'speech': {'mean': np.mean(speech_ste) if len(speech_ste) > 0 else 0,
+                              'std': np.std(speech_ste) if len(speech_ste) > 0 else 0}
+                },
+                'zcr': {
+                    'voiced': {'mean': np.mean(voiced_zcr) if len(voiced_zcr) > 0 else 0,
+                              'std': np.std(voiced_zcr) if len(voiced_zcr) > 0 else 0},
+                    'unvoiced': {'mean': np.mean(unvoiced_zcr) if len(unvoiced_zcr) > 0 else 0,
+                                'std': np.std(unvoiced_zcr) if len(unvoiced_zcr) > 0 else 0}
+                },
+                'st': {
+                    'voiced': {'mean': np.mean(voiced_st) if len(voiced_st) > 0 else 0,
+                              'std': np.std(voiced_st) if len(voiced_st) > 0 else 0},
+                    'unvoiced': {'mean': np.mean(unvoiced_st) if len(unvoiced_st) > 0 else 0,
+                                'std': np.std(unvoiced_st) if len(unvoiced_st) > 0 else 0}
+                }
             }
         }
-    
-    def _dynamic_threshold_single_feature(self, feature_values: np.ndarray, feature_name: str, W: float = 1.0):
-        """
-        Tính dynamic threshold cho một feature theo công thức: T = (W × M1 + M2) / (W + 1)
         
-        Args:
-            feature_values: Array giá trị của feature
-            feature_name: Tên feature để debug
-            W: User-defined parameter (default=1.0)
-            
-        Returns:
-            Tuple: (threshold, histogram_stats)
-        """
-        try:
-            print(f"      Computing {feature_name} threshold (W={W})")
-            
-            # VALIDATION
-            if len(feature_values) < 50:
-                raise ValueError(f"Not enough data: {len(feature_values)} samples")
-                
-            if np.isnan(feature_values).any() or np.isinf(feature_values).any():
-                print(f"      Warning: Invalid values in {feature_name}, cleaning...")
-                feature_values = feature_values[np.isfinite(feature_values)]
-                
-            if len(feature_values) < 50:
-                raise ValueError(f"Not enough valid data after cleaning")
-            
-            # QUICK STATS
-            f_min, f_max = np.min(feature_values), np.max(feature_values)
-            f_mean, f_std = np.mean(feature_values), np.std(feature_values)
-            print(f"      Range: [{f_min:.4f}, {f_max:.4f}], μ±σ: {f_mean:.4f}±{f_std:.4f}")
-            
-            # Bước 1: Tính histogram (REDUCED BINS)
-            n_bins = min(30, max(10, len(feature_values)//100))  # Adaptive bins
-            hist, bin_edges = np.histogram(feature_values, bins=n_bins)
-            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-            
-            # VALIDATE HISTOGRAM
-            if np.sum(hist) == 0:
-                raise ValueError("Empty histogram")
-            
-            # Bước 2: Tìm local maxima với TIMEOUT PROTECTION
-            from scipy.ndimage import gaussian_filter1d
-            smoothed_hist = gaussian_filter1d(hist.astype(float), sigma=0.5)  # Lighter smoothing
-            
-            # Tìm peaks với minimum height và distance
-            min_height = np.max(smoothed_hist) * 0.05  # LOWER threshold (5%)
-            peaks, _ = find_peaks(smoothed_hist, height=min_height, distance=2)  # SHORTER distance
-            
-            if len(peaks) < 2:
-                print(f"      Only {len(peaks)} peaks found, using fallback")
-                # Fallback: Dùng percentiles
-                if "STE" in feature_name:
-                    threshold = np.percentile(feature_values, 25)
-                elif "ZCR" in feature_name:
-                    threshold = np.median(feature_values)
-                elif "ST" in feature_name:
-                    threshold = np.percentile(feature_values, 60)
-                else:
-                    threshold = np.median(feature_values)
-            else:
-                # Sắp xếp peaks theo height (descending) - SAFE OPERATION
-                peak_heights = smoothed_hist[peaks]
-                if len(peak_heights) > 0:
-                    sorted_indices = np.argsort(peak_heights)[::-1]
-                    sorted_peaks = peaks[sorted_indices]
-                    
-                    # Lấy 2 peaks cao nhất
-                    M1_idx = sorted_peaks[0]
-                    M2_idx = sorted_peaks[1] if len(sorted_peaks) > 1 else sorted_peaks[0]
-                    
-                    M1 = bin_centers[M1_idx]
-                    M2 = bin_centers[M2_idx]
-                    
-                    # SAFE COMPUTATION - Áp dụng công thức T = (W × M1 + M2) / (W + 1)
-                    if W > 0:
-                        threshold = (W * M1 + M2) / (W + 1)
-                    else:
-                        threshold = (M1 + M2) / 2  # Fallback for W=0
-                    
-                    print(f"      M1={M1:.4f}, M2={M2:.4f} → T={threshold:.6f}")
-                else:
-                    threshold = np.median(feature_values)
-            
-            # VALIDATE THRESHOLD
-            if np.isnan(threshold) or np.isinf(threshold):
-                print(f"      Invalid threshold, using median")
-                threshold = np.median(feature_values)
-            
-            # SIMPLE STATS (no complex objects to avoid memory issues)
-            hist_stats = {
-                'threshold': threshold,
-                'W': W,
-                'n_peaks': len(peaks) if 'peaks' in locals() else 0,
-                'feature_mean': f_mean,
-                'feature_std': f_std
-            }
-            
-            return threshold, hist_stats
-            
-        except Exception as e:
-            print(f"      ERROR in {feature_name} threshold computation: {str(e)}")
-            # ULTIMATE FALLBACK
-            if "STE" in feature_name:
-                fallback = np.percentile(feature_values, 25)
-            elif "ZCR" in feature_name:
-                fallback = np.median(feature_values) 
-            elif "ST" in feature_name:
-                fallback = np.percentile(feature_values, 60)
-            else:
-                fallback = np.median(feature_values)
-            
-            return fallback, {'threshold': fallback, 'W': W, 'error': str(e)}
+        return training_stats
     
     def classify(self, wav_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -289,40 +237,29 @@ class SUVClassifier:
         # Logic phân loại SUVDA với STE + ZCR + ST
         predictions = np.zeros(min_length, dtype=int)
         
-        # Lấy 3 ngưỡng chính với fallback
+        # Lấy 3 ngưỡng chính
         energy_threshold = self.ste_thresholds.get('speech_silence', 0)
         zcr_threshold = self.zcr_thresholds.get('voiced_unvoiced', 0.5)  
-        st_threshold = self.st_thresholds.get('voiced_unvoiced', 0.7)  # Default từ bài báo SUVDA
+        st_threshold = self.st_thresholds.get('voiced_unvoiced', 0.7)
         
         for i in range(min_length):
             # Logic theo bài báo SUVDA:
-            # - Silence: ZCR < T_ZCR, STE < T_STE
-            # - Unvoiced: ZCR > T_ZCR, STE > T_STE, ST < 0.7
-            # - Voiced: STE > T_STE, ST > 0.7, ZCR thấp
+            # - Silence: STE < T_STE 
+            # - Voiced: STE >= T_STE AND ST > T_ST AND ZCR < T_ZCR
+            # - Unvoiced: STE >= T_STE AND (ST < T_ST OR ZCR > T_ZCR)
             
-            # BƯỚC 1: Kiểm tra SILENCE
-            if ste[i] < energy_threshold and zcr[i] < zcr_threshold:
-                # Cả STE và ZCR đều thấp → SILENCE
-                predictions[i] = 0
-            elif ste[i] < energy_threshold:
-                # Chỉ STE thấp nhưng ZCR cao → vẫn có thể là silence hoặc unvoiced nhỏ
+            if ste[i] < energy_threshold:
+                # Energy thấp → SILENCE
                 predictions[i] = 0
             else:
-                # STE cao → đây là SPEECH
-                # BƯỚC 2: Phân biệt VOICED vs UNVOICED bằng ST + ZCR
-                
+                # Energy cao → SPEECH
+                # Phân biệt voiced vs unvoiced bằng ST và ZCR
                 if st[i] > st_threshold and zcr[i] < zcr_threshold:
-                    # ST cao (năng lượng ở tần số thấp) + ZCR thấp → VOICED
+                    # ST cao (tần số thấp) + ZCR thấp → VOICED
                     predictions[i] = 1
-                elif st[i] < st_threshold and zcr[i] > zcr_threshold:  
-                    # ST thấp (năng lượng ở tần số cao) + ZCR cao → UNVOICED
-                    predictions[i] = 2
                 else:
-                    # Trường hợp không rõ ràng, quyết định dựa trên ST chủ yếu
-                    if st[i] > st_threshold:
-                        predictions[i] = 1  # VOICED
-                    else:
-                        predictions[i] = 2  # UNVOICED
+                    # ST thấp hoặc ZCR cao → UNVOICED
+                    predictions[i] = 2
         
         return audio, ste, zcr, st, predictions
     

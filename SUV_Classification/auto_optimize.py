@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script tự động tối ưu ngưỡng cho SUV Classification
+Script tự động tối ưu ngưỡng cho SUV Classification với ground truth
 """
 
 import os
@@ -19,9 +19,9 @@ from audio_analyzer import AudioAnalyzer
 
 def main():
     """
-    Chạy tối ưu ngưỡng tự động
+    Chạy tối ưu ngưỡng tự động với ground truth từ file lab
     """
-    print("=== HỆ THỐNG TỐI ỬU NGƯỠNG TỰ ĐỘNG ===\\n")
+    print("=== HỆ THỐNG TỐI ỬU NGƯỠNG TỰ ĐỘNG (SUPERVISED) ===\\n")
     
     # Cấu hình đường dẫn
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -39,7 +39,7 @@ def main():
         print(f"Không tìm thấy thư mục dữ liệu: {training_data_dir}")
         return
     
-    # Lấy danh sách file training
+    # Lấy danh sách file training (cần cả wav và lab)
     training_files = []
     wav_files = glob.glob(os.path.join(training_data_dir, "*.wav"))
     
@@ -62,33 +62,20 @@ def main():
     # Khởi tạo optimizer
     optimizer = ThresholdOptimizer()
     
-    # === BƯỚC 1: DYNAMIC THRESHOLD OPTIMIZATION ===
-    print("BƯỚC 1: DYNAMIC THRESHOLD OPTIMIZATION (UNSUPERVISED)\\n")
+    # === TỐI ỬU NGƯỠNG BẰNG GRID SEARCH ===
+    print("BƯỚC 1: GRID SEARCH OPTIMIZATION (SUPERVISED)\\n")
     
-    # Chỉ lấy wav files, không cần lab files - với validation
-    wav_files = []
-    for wav_path, _ in training_files:
-        if os.path.exists(wav_path) and wav_path.endswith('.wav'):
-            wav_files.append(wav_path)
-        else:
-            print(f"Warning: File not found or invalid: {wav_path}")
-    
-    if len(wav_files) == 0:
-        print("\\n❌ ERROR: No valid audio files found!")
-        return
-        
-    print(f"Found {len(wav_files)} valid audio files for dynamic threshold optimization")
-    
-    best_params = optimizer.optimize_dynamic_thresholds(
-        training_files=wav_files,
+    best_params = optimizer.optimize_thresholds_grid_search(
+        training_files=training_files,
+        validation_split=0.3,
         verbose=True
     )
     
     # KIỂM TRA KẾT QUẢ OPTIMIZATION
-    if best_params is None:
+    if not best_params or best_params.get('score', 0) == 0:
         print("\\n❌ OPTIMIZATION FAILED - No valid parameters found!")
         print("This could be due to:")
-        print("  • Invalid audio files")
+        print("  • Invalid audio/label files")
         print("  • Insufficient data")
         print("  • Computation errors")
         return
@@ -100,9 +87,9 @@ def main():
     
     print(f"\\nĐã lưu ngưỡng tối ưu vào: {best_params_file}")
     
-    # === BƯỚC 2: DEMO DYNAMIC THRESHOLDS ===
+    # === ĐÁNH GIÁ VỚI NGƯỠNG TỐI ỬU ===
     print("\\n" + "="*60)
-    print("BƯỚC 2: DEMO DYNAMIC THRESHOLDS TRÊN TẤT CẢ FILE")
+    print("BƯỚC 2: ĐÁNH GIÁ VỚI NGƯỠNG TỐI ỬU")
     print("="*60)
     
     # Tạo classifier với ngưỡng tối ưu
@@ -112,7 +99,7 @@ def main():
         sr=16000
     )
     
-    # Set ngưỡng tối ưu (bao gồm ST thresholds mới)
+    # Set ngưỡng tối ưu
     optimal_classifier.ste_thresholds = {
         'speech_silence': best_params.get('ste_speech_silence', best_params.get('energy_threshold', 0)),
         'voiced_unvoiced': best_params.get('ste_voiced_unvoiced', 0)
@@ -121,9 +108,8 @@ def main():
         'speech_silence': best_params.get('zcr_speech_silence', 0), 
         'voiced_unvoiced': best_params.get('zcr_voiced_unvoiced', best_params.get('zcr_threshold', 0.5))
     }
-    # Khởi tạo ST thresholds cho SUVDA
     optimal_classifier.st_thresholds = {
-        'speech_silence': 0,
+        'speech_silence': best_params.get('st_speech_silence', 0),
         'voiced_unvoiced': best_params.get('st_voiced_unvoiced', best_params.get('st_threshold', 0.7))
     }
     optimal_classifier.trained = True
@@ -138,11 +124,11 @@ def main():
     
     evaluation_results = []
     
-    for i, (wav_path, _) in enumerate(training_files):
+    for i, (wav_path, lab_path) in enumerate(training_files):
         filename = os.path.basename(wav_path)
-        print(f"\\nDemo file {i+1}/{len(training_files)}: {filename}")
+        print(f"\\nĐánh giá file {i+1}/{len(training_files)}: {filename}")
         
-        # Phân loại với dynamic thresholds
+        # Phân loại với ngưỡng tối ưu
         result = optimal_classifier.classify(wav_path)
         if len(result) == 5:  # Có ST
             audio, ste, zcr, st, predictions = result
@@ -151,87 +137,115 @@ def main():
             st = None
         smoothed_predictions = optimal_classifier.smooth_predictions(predictions, min_segment_length=30)
         
-        # Thống kê kết quả classification (không cần ground truth)
-        unique, counts = np.unique(smoothed_predictions, return_counts=True)
-        total_frames = len(smoothed_predictions)
+        # Load ground truth
+        segments = analyzer.load_labels(lab_path)
+        true_labels = analyzer.get_frame_labels(segments, len(audio))
         
-        print(f"  Total frames: {total_frames}")
-        for label, count in zip(unique, counts):
-            label_name = ["Silence", "Voiced", "Unvoiced"][label]
-            percentage = (count / total_frames) * 100
-            print(f"  {label_name}: {count} frames ({percentage:.1f}%)")
+        # Đảm bảo chiều dài khớp nhau
+        min_length = min(len(true_labels), len(smoothed_predictions))
+        true_labels = true_labels[:min_length]
+        smoothed_predictions = smoothed_predictions[:min_length]
         
-        # Hiển thị feature statistics
-        print(f"  Feature ranges:")
-        print(f"    STE: [{np.min(ste):.4f}, {np.max(ste):.4f}], mean: {np.mean(ste):.4f}")
-        print(f"    ZCR: [{np.min(zcr):.4f}, {np.max(zcr):.4f}], mean: {np.mean(zcr):.4f}")
-        if st is not None:
-            print(f"    ST: [{np.min(st):.4f}, {np.max(st):.4f}], mean: {np.mean(st):.4f}")
-        
-        # Tính predicted boundaries (chỉ để demo)
+        # Tính toán boundaries
+        true_boundaries = evaluator.segments_to_boundaries(segments)
         pred_boundaries = evaluator.predictions_to_boundaries(smoothed_predictions)
-        print(f"  Predicted segments: {len(pred_boundaries)//2 if len(pred_boundaries) > 0 else 0}")
         
+        # Đánh giá
+        boundary_metrics = evaluator.compute_boundary_error(true_boundaries, pred_boundaries)
+        frame_metrics = evaluator.compute_frame_accuracy(true_labels, smoothed_predictions)
+        
+        print(f"  Boundary Error - MAE: {boundary_metrics['mae']:.4f}s, RMSE: {boundary_metrics['rmse']:.4f}s")
+        print(f"  Frame Accuracy: {frame_metrics['overall_accuracy']:.4f}")
+        print(f"  Class Accuracies - Silence: {frame_metrics['class_accuracies']['silence']:.4f}, " + 
+              f"Voiced: {frame_metrics['class_accuracies']['voiced']:.4f}, " +
+              f"Unvoiced: {frame_metrics['class_accuracies']['unvoiced']:.4f}")
+        
+        # Lưu kết quả
+        result = {
+            'filename': filename,
+            'boundary_metrics': boundary_metrics,
+            'frame_metrics': frame_metrics
+        }
+        evaluation_results.append(result)
+        
+        # Vẽ và lưu biểu đồ
+        plot_title = f"SUV Classification (Optimized) - {filename.replace('.wav', '')}"
+        plot_path = os.path.join(results_dir, f"{filename.replace('.wav', '')}_optimized_result.png")
+        
+        evaluator.plot_results(
+            audio=audio,
+            ste=ste,
+            zcr=zcr,
+            true_labels=true_labels,
+            pred_labels=smoothed_predictions,
+            true_boundaries=true_boundaries,
+            pred_boundaries=pred_boundaries,
+            title=plot_title,
+            save_path=plot_path,
+            st=st
+        )
     
     # === TẠO BÁO CÁO TỔNG HỢP ===
     print("\\n" + "="*60)
-    print("BÁO CÁO TỔNG HỢP")
+    print("BÁO CÁO KẾT QUẢ VỚI NGƯỠNG TỐI ỬU")
     print("="*60)
     
-    # Demo hoàn thành - không cần accuracy metrics
+    # Thống kê tổng hợp
+    accuracies = [r['frame_metrics']['overall_accuracy'] for r in evaluation_results]
+    maes = [r['boundary_metrics']['mae'] for r in evaluation_results]
+    rmses = [r['boundary_metrics']['rmse'] for r in evaluation_results]
     
-    print(f"\\nDYNAMIC THRESHOLDS SUMMARY:")
-    print(f"Separation Score: {best_params['separation_score']:.4f}")
-    print(f"Optimal W parameters: STE={best_params['W_STE']}, ZCR={best_params['W_ZCR']}, ST={best_params['W_ST']}")
-    print(f"Files processed: {len(training_files)}")
+    print(f"\\nTHỐNG KÊ HIỆU SUẤT:")
+    print(f"Frame Accuracy - Mean: {np.mean(accuracies):.4f}, Std: {np.std(accuracies):.4f}")
+    print(f"Boundary MAE - Mean: {np.mean(maes):.4f}s, Std: {np.std(maes):.4f}s")
+    print(f"Boundary RMSE - Mean: {np.mean(rmses):.4f}s, Std: {np.std(rmses):.4f}s")
     
-    # Lưu báo cáo dynamic thresholds
-    report_file = os.path.join(results_dir, "dynamic_threshold_report.txt")
+    # Lưu báo cáo tối ưu
+    report_file = os.path.join(results_dir, "threshold_optimization_report.txt")
     with open(report_file, 'w', encoding='utf-8') as f:
-        f.write("=== DYNAMIC THRESHOLD OPTIMIZATION REPORT ===\\n\\n")
-        f.write("Approach: UNSUPERVISED (không cần ground truth)\\n")
-        f.write("Công thức: T = (W × M1 + M2) / (W + 1)\\n")
-        f.write("M1, M2: vị trí của 2 local maxima trong histogram\\n\\n")
+        f.write("=== THRESHOLD OPTIMIZATION REPORT ===\\n\\n")
+        f.write("Approach: SUPERVISED (với ground truth từ file .lab)\\n")
+        f.write("Method: Grid Search với Cross-Validation\\n\\n")
         
         f.write("THAM SỐ TỐI ỬU:\\n")
         f.write(f"Frame Length: {best_params['frame_length']*1000:.0f}ms\\n")
         f.write(f"Frame Shift: {best_params['frame_shift']*1000:.0f}ms\\n")
-        f.write(f"W_STE: {best_params['W_STE']}\\n")
-        f.write(f"W_ZCR: {best_params['W_ZCR']}\\n")
-        f.write(f"W_ST: {best_params['W_ST']}\\n\\n")
         
-        f.write("DYNAMIC THRESHOLDS COMPUTED:\\n")
-        f.write(f"T_STE (Energy): {best_params['energy_threshold']:.6f}\\n")
-        f.write(f"T_ZCR: {best_params['zcr_threshold']:.6f}\\n")
-        f.write(f"T_ST (Spectrum Tilt): {best_params['st_threshold']:.6f}\\n\\n")
+        energy_thresh = best_params.get('energy_threshold', best_params.get('ste_speech_silence', 0))
+        zcr_thresh = best_params.get('zcr_threshold', best_params.get('zcr_voiced_unvoiced', 0))
+        st_thresh = best_params.get('st_threshold', best_params.get('st_voiced_unvoiced', 0.7))
         
-        f.write(f"SEPARATION SCORE: {best_params['separation_score']:.4f}\\n")
-        f.write("(Unsupervised metric - higher = better feature separation)\\n")
+        f.write(f"Energy Threshold: {energy_thresh:.6f}\\n")
+        f.write(f"ZCR Threshold: {zcr_thresh:.6f}\\n")
+        f.write(f"ST Threshold: {st_thresh:.6f}\\n")
+        f.write(f"Optimization Score: {best_params['score']:.4f}\\n\\n")
+        
+        f.write("HIỆU SUẤT:\\n")
+        f.write(f"Frame Accuracy: {np.mean(accuracies):.4f} ± {np.std(accuracies):.4f}\\n")
+        f.write(f"Boundary MAE: {np.mean(maes):.4f} ± {np.std(maes):.4f}s\\n")
+        f.write(f"Boundary RMSE: {np.mean(rmses):.4f} ± {np.std(rmses):.4f}s\\n\\n")
+        
+        f.write(optimizer.get_optimization_report())
     
     print(f"\\nĐã lưu báo cáo vào: {report_file}")
     
-    # Lấy ngưỡng dynamic
-    energy_thresh = best_params['energy_threshold']
-    zcr_thresh = best_params['zcr_threshold']
-    st_thresh = best_params['st_threshold']
+    # Hiển thị ngưỡng cuối cùng
+    energy_thresh = best_params.get('energy_threshold', best_params.get('ste_speech_silence', 0))
+    zcr_thresh = best_params.get('zcr_threshold', best_params.get('zcr_voiced_unvoiced', 0))
+    st_thresh = best_params.get('st_threshold', best_params.get('st_voiced_unvoiced', 0.7))
     
-    print(f"\\nDYNAMIC THRESHOLDS RESULT:")
+    print(f"\\nNGƯỚNG TỐI ỬU TÌM ĐƯỢC:")
     print(f"   Frame: {best_params['frame_length']*1000:.0f}ms/{best_params['frame_shift']*1000:.0f}ms")
-    print(f"   W parameters: STE={best_params['W_STE']}, ZCR={best_params['W_ZCR']}, ST={best_params['W_ST']}")
-    print(f"   T_STE (Energy): {energy_thresh:.6f}")
-    print(f"   T_ZCR: {zcr_thresh:.6f}")  
-    print(f"   T_ST (Spectrum Tilt): {st_thresh:.6f}")
+    print(f"   Energy Threshold: {energy_thresh:.6f}")
+    print(f"   ZCR Threshold: {zcr_thresh:.6f}")  
+    print(f"   ST Threshold: {st_thresh:.6f}")
+    print(f"   Score: {best_params['score']:.4f}")
     
-    print(f"\\nSUVDA LOGIC (DYNAMIC THRESHOLDS - UNSUPERVISED):")
-    print(f"   SILENCE: STE < {energy_thresh:.4f} AND ZCR < {zcr_thresh:.4f}")
-    print(f"   VOICED: STE >= {energy_thresh:.4f} AND ST > {st_thresh:.4f} AND ZCR < {zcr_thresh:.4f}")
-    print(f"   UNVOICED: STE >= {energy_thresh:.4f} AND ST < {st_thresh:.4f} AND ZCR > {zcr_thresh:.4f}")
-    
-    print("\\n🎯 DYNAMIC THRESHOLD OPTIMIZATION COMPLETED!")
+    print("\\n🎯 THRESHOLD OPTIMIZATION COMPLETED!")
     print("📄 Files saved:")
     print(f"   • {best_params_file}")
     print(f"   • {report_file}")
-    print("✅ No ground truth required - fully unsupervised approach!")
+    print("✅ Optimization completed with ground truth validation!")
 
 if __name__ == "__main__":
     main()
